@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}管理后台{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-bold">管理后台</h1>
+  <p class="text-sm text-slate-600 dark:text-slate-400">{{ admin.username }} · 超级管理员</p>
+</div>
+
+<!-- Stats -->
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+  {% set cards = [
+    ("用户总数", stats.users_total, "slate"),
+    ("活跃用户", stats.users_active, "emerald"),
+    ("未使用授权码", stats.codes_unused, "indigo"),
+    ("今日触发数", stats.runs_today, "amber"),
+  ] %}
+  {% for label, value, color in cards %}
+  <div class="card p-5">
+    <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">{{ label }}</div>
+    <div class="mt-2 text-3xl font-bold">{{ value }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+  <a href="/admin/users" class="card p-5 hover:shadow-md transition">
+    <div class="font-semibold mb-1">用户管理</div>
+    <div class="text-sm text-slate-500">{{ stats.users_total }} 用户 · {{ stats.accounts_total }} 账户</div>
+  </a>
+  <a href="/admin/codes" class="card p-5 hover:shadow-md transition">
+    <div class="font-semibold mb-1">授权码</div>
+    <div class="text-sm text-slate-500">{{ stats.codes_total }} 张 · {{ stats.codes_unused }} 未使用</div>
+  </a>
+  <a href="/admin/announcements" class="card p-5 hover:shadow-md transition">
+    <div class="font-semibold mb-1">公告管理</div>
+    <div class="text-sm text-slate-500">发布给所有用户的弹窗公告</div>
+  </a>
+  <a href="/admin/smtp" class="card p-5 hover:shadow-md transition">
+    <div class="font-semibold mb-1">邮件 SMTP</div>
+    <div class="text-sm text-slate-500">系统告警邮件配置</div>
+  </a>
+  <a href="/admin/audit" class="card p-5 hover:shadow-md transition">
+    <div class="font-semibold mb-1">审计日志</div>
+    <div class="text-sm text-slate-500">系统所有关键操作的记录</div>
+  </a>
+</div>
+
+<!-- Recent activity -->
+<div class="card overflow-hidden">
+  <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 font-semibold">最近活动</div>
+  <table class="w-full">
+    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+      <tr>
+        <th class="px-4 py-2 text-left">时间</th>
+        <th class="px-4 py-2 text-left">操作者</th>
+        <th class="px-4 py-2 text-left">动作</th>
+        <th class="px-4 py-2 text-left">对象</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700 text-sm">
+      {% for l in logs %}
+      <tr>
+        <td class="px-4 py-2 text-slate-500">{{ l.ts.strftime("%m-%d %H:%M") }}</td>
+        <td class="px-4 py-2">{{ l.actor_kind }}{% if l.actor_user_id %} ({{ l.actor_user_id }}){% endif %}</td>
+        <td class="px-4 py-2"><span class="pill pill-slate">{{ l.action }}</span></td>
+        <td class="px-4 py-2 text-slate-500">{{ l.target_type or "-" }} {{ l.target_id or "" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="px-4 py-6 text-center text-slate-500">暂无记录</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

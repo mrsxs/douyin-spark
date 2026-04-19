@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}审计日志 · 管理后台{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <div class="text-sm text-slate-500"><a href="/admin" class="hover:underline">← 管理后台</a></div>
+  <h1 class="text-2xl font-bold mt-1">审计日志</h1>
+</div>
+
+<div class="card p-4 mb-4">
+  <form method="get" class="flex gap-2">
+    <input name="action" value="{{ action }}" placeholder="按 action 过滤（如 login）" class="input" />
+    <button class="btn-primary">筛选</button>
+  </form>
+</div>
+
+<div class="card overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+      <tr>
+        <th class="px-4 py-3 text-left">时间</th>
+        <th class="px-4 py-3 text-left">操作者</th>
+        <th class="px-4 py-3 text-left">动作</th>
+        <th class="px-4 py-3 text-left">对象</th>
+        <th class="px-4 py-3 text-left">详情</th>
+        <th class="px-4 py-3 text-left">IP</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+      {% for l in logs %}
+      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/30">
+        <td class="px-4 py-3 text-xs text-slate-500">{{ l.ts.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        <td class="px-4 py-3 text-sm">
+          <span class="pill pill-slate">{{ l.actor_kind }}</span>
+          {% if l.actor_user_id %}<span class="text-slate-500 ml-1">#{{ l.actor_user_id }}</span>{% endif %}
+        </td>
+        <td class="px-4 py-3"><span class="pill pill-indigo">{{ l.action }}</span></td>
+        <td class="px-4 py-3 text-sm text-slate-500">{{ l.target_type or "-" }}{% if l.target_id %} #{{ l.target_id }}{% endif %}</td>
+        <td class="px-4 py-3 text-xs text-slate-500 font-mono max-w-md truncate">{{ l.meta or "" }}</td>
+        <td class="px-4 py-3 text-xs text-slate-500 font-mono">{{ l.ip or "" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">暂无日志</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if total > per_page %}
+  <div class="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
+    <div class="text-slate-500">共 {{ total }} 条</div>
+    <div class="flex gap-2">
+      {% if page > 1 %}<a href="?action={{ action }}&page={{ page - 1 }}" class="btn-sec text-xs">上一页</a>{% endif %}
+      {% if page * per_page < total %}<a href="?action={{ action }}&page={{ page + 1 }}" class="btn-sec text-xs">下一页</a>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

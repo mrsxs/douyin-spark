@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}注册 · {{ site_name }}{% endblock %}
+{% block content %}
+<div class="max-w-md mx-auto mt-12 space-y-4">
+  <div class="mb-4">
+    {% include '_buy_cta.html' %}
+  </div>
+  <div class="card p-8">
+    <h1 class="text-2xl font-bold text-center mb-2">创建账号</h1>
+    <p class="text-sm text-center text-slate-600 dark:text-slate-400 mb-6">注册后需要输入授权码才能使用功能</p>
+    {% if error %}
+    <div class="mb-4 p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-lg text-sm text-rose-700 dark:text-rose-400">
+      {% if error == "username_format" %}用户名格式错误（3-32 位英数下划线）
+      {% elif error == "password_too_short" %}密码至少 6 位
+      {% elif error == "password_mismatch" %}两次密码不一致
+      {% elif error == "username_taken" %}用户名已被占用
+      {% elif error == "email_taken" %}邮箱已被占用
+      {% else %}未知错误{% endif %}
+    </div>
+    {% endif %}
+    <form method="post" action="/register" class="space-y-4">
+      <div>
+        <label class="label">用户名</label>
+        <input name="username" class="input" pattern="[A-Za-z0-9_]{3,32}" required autocomplete="username" placeholder="3-32 位英数下划线" />
+      </div>
+      <div>
+        <label class="label">邮箱（可选）</label>
+        <input type="email" name="email" class="input" autocomplete="email" />
+      </div>
+      <div>
+        <label class="label">密码</label>
+        <input type="password" name="password" class="input" minlength="6" required autocomplete="new-password" />
+      </div>
+      <div>
+        <label class="label">重复密码</label>
+        <input type="password" name="password2" class="input" minlength="6" required autocomplete="new-password" />
+      </div>
+      <button type="submit" class="btn-primary w-full justify-center">注册</button>
+    </form>
+    <div class="mt-6 text-center text-sm text-slate-600 dark:text-slate-400">
+      已有账号？<a href="/login" class="text-brand-600 dark:text-brand-400 font-medium hover:underline">登录</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

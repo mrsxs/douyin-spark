@@ -1,0 +1,434 @@
+{% extends "base.html" %}
+{% block title %}{{ acc.nickname or acc.label }} · {{ site_name }}{% endblock %}
+{% block content %}
+<div x-data="accountPage()">
+
+<!-- 顶部信息 -->
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <div class="text-sm text-slate-500"><a href="/dashboard" class="hover:underline">← 返回</a></div>
+    <h1 class="text-2xl font-bold mt-1">{{ acc.nickname or acc.label }}</h1>
+    <div class="text-sm text-slate-500 mt-1">
+      {{ acc.label }}{% if acc.dy_uid %} · uid={{ acc.dy_uid }}{% endif %}
+    </div>
+  </div>
+  <div class="flex gap-2">
+    <button @click="runAutoConfirm=true" class="btn-primary" :disabled="running">
+      <span x-show="!running">🔥 立即续火花</span>
+      <span x-show="running">运行中...</span>
+    </button>
+    <button @click="batchSend()" class="btn-sec" :disabled="batchRunning">
+      <span x-show="!batchRunning">📨 批量发送 <span x-show="selectedCount>0" x-text="'('+selectedCount+')'"></span></span>
+      <span x-show="batchRunning">发送中...</span>
+    </button>
+    <button @click="refreshContacts()" class="btn-sec">刷新联系人</button>
+    <button @click="checkCookies()" class="btn-sec" :disabled="checking">
+      <span x-show="!checking">🩺 体检登录态</span>
+      <span x-show="checking">体检中...</span>
+    </button>
+    <a href="/accounts/{{ acc.id }}/runs" class="btn-sec">📊 运行历史</a>
+  </div>
+</div>
+
+{% if finalizing %}
+<div class="card p-5 mb-6 bg-amber-50 dark:bg-amber-900/20 !ring-amber-200 dark:!ring-amber-800">
+  <div class="flex items-center gap-4">
+    <svg class="w-6 h-6 text-amber-600 dark:text-amber-400 animate-spin shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+    <div class="flex-1">
+      <div class="font-medium text-amber-900 dark:text-amber-300">正在完成登录流程...</div>
+      <div class="text-xs text-amber-700 dark:text-amber-400 mt-1">
+        后台正在抓取 IM 会话数据和登录私钥（通常 20-40 秒）。页面会自动刷新，也可以手动刷新查看进度。
+      </div>
+    </div>
+  </div>
+</div>
+<meta http-equiv="refresh" content="5" />
+{% elif load_error %}
+<div class="card p-4 mb-6 bg-rose-50 dark:bg-rose-900/20 !ring-rose-200 dark:!ring-rose-800">
+  <div class="text-sm text-rose-700 dark:text-rose-400">
+    <strong>加载联系人失败</strong>：{{ load_error }}
+    <a href="/accounts/{{ acc.id }}/login" class="underline ml-2">重新登录</a>
+  </div>
+</div>
+{% endif %}
+
+<!-- Tabs -->
+<div class="border-b border-slate-200 dark:border-slate-700 mb-6">
+  <nav class="flex gap-1 -mb-px">
+    <template x-for="t in tabs" :key="t.key">
+      <button @click="tab=t.key"
+              class="px-4 py-2.5 text-sm font-medium border-b-2 transition"
+              :class="tab===t.key ? 'border-brand-600 text-brand-600 dark:text-brand-400' : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'">
+        <span x-text="t.label"></span>
+      </button>
+    </template>
+  </nav>
+</div>
+
+<!-- 联系人 Tab -->
+<div x-show="tab==='contacts'">
+  <!-- 搜索 + 统计 -->
+  <form method="get" action="/accounts/{{ acc.id }}" class="mb-4 flex items-center gap-2">
+    <input type="text" name="q" value="{{ q }}" placeholder="搜索联系人昵称 / UID / 备注..."
+           class="input max-w-md" />
+    <button type="submit" class="btn-sec">搜索</button>
+    {% if q %}<a href="/accounts/{{ acc.id }}" class="btn-ghost text-sm">清除</a>{% endif %}
+    <div class="ml-auto text-sm text-slate-500 whitespace-nowrap">
+      {% if q %}{{ filtered_total }} / {% endif %}共 {{ full_total }} 人
+    </div>
+  </form>
+
+  {% if contacts %}
+  <div class="card overflow-x-auto -mx-4 sm:mx-0 sm:rounded-xl">
+    <table class="w-full min-w-[820px]">
+      <thead class="bg-slate-50 dark:bg-slate-700/30 border-b border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-400 uppercase whitespace-nowrap">
+        <tr>
+          <th class="px-3 py-3 text-center w-10">
+            <input type="checkbox" id="select-all" onchange="toggleAll(this)"
+                   class="w-4 h-4 accent-brand-600 cursor-pointer" title="全选" />
+          </th>
+          <th class="px-2 py-3 text-left w-10">#</th>
+          <th class="px-4 py-3 text-left w-48">联系人</th>
+          <th class="px-4 py-3 text-left w-20">火花</th>
+          <th class="px-4 py-3 text-center w-20">启用</th>
+          <th class="px-4 py-3 text-left">消息（每行一条）</th>
+          <th class="px-4 py-3 text-center w-24">操作</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+        {% for c in contacts %}
+          {% set uid = c['uid'] %}
+          {% set tpl = templates.get(uid, {"enabled": True, "messages": []}) %}
+        <tr data-uid="{{ uid }}">
+          <td class="px-3 py-3 text-center">
+            <input type="checkbox" class="contact-select w-4 h-4 accent-brand-600 cursor-pointer"
+                   value="{{ uid }}" onchange="updateSelectedCount()" />
+          </td>
+          <td class="px-2 py-3 text-sm text-slate-500">{{ (page - 1) * per_page + loop.index }}</td>
+          <td class="px-4 py-3">
+            <div class="font-medium truncate max-w-[180px]" title="{{ c['nickname'] }}">{{ c['nickname'] }}</div>
+            <div class="text-xs text-slate-500 truncate max-w-[180px]" title="{{ uid }}">{{ uid }}</div>
+          </td>
+          <td class="px-4 py-3 whitespace-nowrap">
+            <span class="pill pill-indigo whitespace-nowrap">{{ c['days'] }}天</span>
+          </td>
+          <td class="px-4 py-3 text-center">
+            <label class="inline-flex items-center cursor-pointer select-none"
+                   x-data="{ on: {{ 'true' if tpl.enabled else 'false' }} }">
+              <input type="checkbox" class="sr-only toggle-enabled" :checked="on"
+                     @change="on = $event.target.checked; saveTpl('{{ uid }}', $event.target.closest('tr'), on)" />
+              <div class="relative w-11 h-6 rounded-full transition-colors duration-200 ease-in-out"
+                   :class="on ? 'bg-brand-600' : 'bg-slate-400 dark:bg-slate-600'">
+                <div class="absolute top-0.5 left-0.5 bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-200 ease-in-out"
+                     :class="on ? 'translate-x-5' : 'translate-x-0'"></div>
+              </div>
+            </label>
+          </td>
+          <td class="px-4 py-3">
+            <textarea class="input min-h-[64px] font-normal contact-msgs" rows="2"
+                      placeholder="留空则使用下方「通用模板」"
+                      onblur="saveTpl('{{ uid }}', this.closest('tr'))">{{ (tpl.messages or [])|join('\n') }}</textarea>
+            <div class="mt-1.5 flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span class="shrink-0 mt-0.5">通用模板：</span>
+              <code class="flex-1 break-all default-preview text-slate-700 dark:text-slate-300"></code>
+              <button type="button" onclick="useDefault(this.closest('tr'))"
+                      class="shrink-0 text-brand-600 dark:text-brand-400 hover:underline">↑ 填入</button>
+            </div>
+          </td>
+          <td class="px-4 py-3 text-center">
+            <button @click="previewSend('{{ uid }}', '{{ c['nickname']|e }}')" class="btn-sec text-xs whitespace-nowrap">测试发送</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if total_pages > 1 %}
+  <div class="mt-4 flex items-center justify-center gap-2 text-sm">
+    {% set qs_base = '&q=' + q if q else '' %}
+    {% if page > 1 %}
+      <a href="?page={{ page - 1 }}{{ qs_base }}" class="btn-sec">← 上一页</a>
+    {% else %}
+      <span class="btn-sec opacity-40 cursor-not-allowed">← 上一页</span>
+    {% endif %}
+    <span class="px-4 py-2 text-slate-500">第 {{ page }} / {{ total_pages }} 页</span>
+    {% if page < total_pages %}
+      <a href="?page={{ page + 1 }}{{ qs_base }}" class="btn-sec">下一页 →</a>
+    {% else %}
+      <span class="btn-sec opacity-40 cursor-not-allowed">下一页 →</span>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="card p-8 text-center text-slate-500">
+    {% if q %}没有匹配「{{ q }}」的联系人{% else %}暂无火花联系人{% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- 通用模板 Tab -->
+<div x-show="tab==='default'" x-cloak>
+  <div class="card p-6 max-w-2xl">
+    <h3 class="font-semibold mb-1">通用模板（兜底）</h3>
+    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">联系人单独的消息列表为空时，会从这里随机选一条发送。修改后下方联系人的「将使用通用模板」提示会同步更新。</p>
+    <div class="space-y-4">
+      <label class="flex items-center gap-3">
+        <input type="checkbox" id="def-en" {% if default_tpl.enabled %}checked{% endif %} onchange="saveDefault()" class="w-5 h-5 accent-brand-600" />
+        <span class="text-sm font-medium">启用</span>
+      </label>
+      <div>
+        <label class="label">消息列表（每行一条，发送时随机选）</label>
+        <textarea id="def-msgs" class="input min-h-[120px] font-normal" onblur="saveDefault()">{{ (default_tpl.messages or [])|join('\n') }}</textarea>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 定时 Tab -->
+<div x-show="tab==='schedule'" x-cloak>
+  <div class="card p-6 max-w-2xl">
+    <h3 class="font-semibold mb-1">⏰ 定时续火花</h3>
+    <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">到点后后台按上方模板自动发送（仅在面板运行时生效）</p>
+    <div class="space-y-5">
+      <label class="flex items-center gap-3">
+        <input type="checkbox" id="sch-en" {% if schedule.enabled %}checked{% endif %} onchange="saveSchedule()" class="w-5 h-5 accent-brand-600" />
+        <span class="text-sm font-medium">启用每日定时</span>
+      </label>
+      <div>
+        <label class="label">发送时间</label>
+        <input type="time" id="sch-time" value="{{ schedule.time_hhmm }}" onchange="saveSchedule()" class="input max-w-[160px]" />
+      </div>
+      {% if schedule.last_ran_date %}
+      <div class="text-xs text-slate-500">
+        最后触发：{{ schedule.last_ran_date }}
+        {% if schedule.last_result %}· {{ schedule.last_result }}{% endif %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- 日志 Tab -->
+<div x-show="tab==='logs'" x-cloak>
+  <div class="card p-4">
+    <a href="/accounts/{{ acc.id }}/logs" class="btn-sec text-sm">查看完整日志</a>
+    <div class="mt-4 text-xs font-mono text-slate-500 dark:text-slate-400">今日日志会在这里显示（简化版，完整版请点上方按钮）</div>
+  </div>
+</div>
+
+<!-- 立即续火花 确认 Modal -->
+<dialog x-ref="runAutoDialog"
+        x-effect="runAutoConfirm ? (!$refs.runAutoDialog.open && $refs.runAutoDialog.showModal()) : ($refs.runAutoDialog.open && $refs.runAutoDialog.close())"
+        @close="runAutoConfirm=false"
+        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full max-w-md">
+  <div class="p-6">
+    <h3 class="font-semibold text-lg mb-2">🔥 立即给所有联系人续火花</h3>
+    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">
+      将给所有启用的联系人按模板发一条消息（间隔 5s）。如果部分联系人没单独配置消息，会使用「通用模板」。
+    </p>
+    <div class="flex justify-end gap-2">
+      <button type="button" @click="runAutoConfirm=false" class="btn-sec">取消</button>
+      <button type="button" @click="runAutoConfirm=false; runAuto()" class="btn-primary">确认执行</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- 发送 Modal（原生 dialog：native focus trap + ESC close + backdrop 点击不关闭）-->
+<dialog x-ref="sendDialog"
+        x-effect="sendModal.open ? (!$refs.sendDialog.open && $refs.sendDialog.showModal()) : ($refs.sendDialog.open && $refs.sendDialog.close())"
+        @close="sendModal.open=false; sendModal.sending=false"
+        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full max-w-lg">
+  <div class="p-6">
+    <h3 class="font-semibold text-lg mb-1" x-text="sendModal.targets.length===1 ? '测试发送 · '+sendModal.targets[0].name : '批量发送 · '+sendModal.targets.length+' 人'"></h3>
+    <p class="text-xs text-slate-500 mb-4" x-show="sendModal.targets.length>1"
+       x-text="sendModal.targets.map(t=>t.name).join('、')"></p>
+    <textarea x-model="sendModal.text" class="input min-h-[100px] font-normal"
+              placeholder="要发送的消息内容..."></textarea>
+    <div x-show="sendModal.status" x-cloak class="mt-3 text-sm" x-text="sendModal.status"></div>
+    <div x-show="sendModal.results.length" x-cloak class="mt-3 max-h-48 overflow-y-auto text-xs space-y-1">
+      <template x-for="r in sendModal.results" :key="r.uid">
+        <div :class="r.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+          <span x-text="(r.ok?'✓ ':'✗ ') + (r.nickname||r.uid) + '：' + (r.detail||'')"></span>
+        </div>
+      </template>
+    </div>
+    <div class="mt-4 flex justify-end gap-2">
+      <button type="button" @click="sendModal.open=false" class="btn-sec" :disabled="sendModal.sending">取消</button>
+      <button type="button" @click="doSend()" class="btn-primary" :disabled="sendModal.sending || !sendModal.text.trim()">
+        <span x-show="!sendModal.sending">发送</span>
+        <span x-show="sendModal.sending">发送中...</span>
+      </button>
+    </div>
+  </div>
+</dialog>
+
+</div>
+
+<script>
+function accountPage() {
+  return {
+    tab: 'contacts',
+    running: false,
+    batchRunning: false,
+    checking: false,
+    runAutoConfirm: false,
+    selectedCount: 0,
+    sendModal: {
+      open: false, sending: false, text: '', status: '',
+      targets: [],   // [{uid, name}]
+      results: [],   // [{uid, nickname, ok, detail}]
+    },
+    init() {
+      // 暴露 x-data 实例，供普通 function 回写 selectedCount / 打开 modal
+      window._accountPage = this;
+    },
+    openSend(targets) {
+      this.sendModal.open = true;
+      this.sendModal.sending = false;
+      this.sendModal.text = '';
+      this.sendModal.status = '';
+      this.sendModal.results = [];
+      this.sendModal.targets = targets;
+    },
+    async doSend() {
+      const text = this.sendModal.text.trim();
+      if (!text) return;
+      this.sendModal.sending = true;
+      this.sendModal.status = '发送中...';
+      this.sendModal.results = [];
+      try {
+        if (this.sendModal.targets.length === 1) {
+          const t = this.sendModal.targets[0];
+          const r = await api('/api/send', 'POST',
+            {account_id: {{ acc.id }}, uid: t.uid, text});
+          this.sendModal.results = [{uid: t.uid, nickname: t.name,
+                                     ok: r.ok, detail: r.detail || r.error || ''}];
+          this.sendModal.status = r.ok
+            ? '✓ 已送达（' + (r.detail || '服务端 OK') + '）'
+            : '✗ ' + (r.detail || r.error || '失败');
+        } else {
+          const uids = this.sendModal.targets.map(t => t.uid);
+          const r = await api('/api/send-batch', 'POST',
+            {account_id: {{ acc.id }}, uids, text});
+          if (!r.ok) {
+            this.sendModal.status = '✗ ' + (r.error || '失败');
+          } else {
+            this.sendModal.results = r.results || [];
+            this.sendModal.status = `完成：送达 ${r.sent}，失败 ${r.failed}`;
+          }
+        }
+      } catch (e) {
+        this.sendModal.status = '✗ 前端异常: ' + (e && e.message || e);
+        console.error('[doSend]', e);
+      } finally {
+        this.sendModal.sending = false;
+      }
+    },
+    tabs: [
+      {key:'contacts', label:'联系人'},
+      {key:'default',  label:'通用模板'},
+      {key:'schedule', label:'定时'},
+      {key:'logs',     label:'日志'},
+    ],
+    async runAuto() {
+      this.running = true;
+      try {
+        const r = await api('/api/auto', 'POST', {account_id: {{ acc.id }}});
+        if (r.ok) toast(`已送 ${r.sent}，跳过 ${r.skipped}，失败 ${r.failed}`);
+        else toast(r.error || '失败', 'err');
+      } finally { this.running = false; }
+    },
+    async refreshContacts() {
+      const r = await api('/api/refresh', 'POST', {account_id: {{ acc.id }}});
+      if (r.ok) { toast('刷新成功，正在重载...'); setTimeout(()=>location.reload(), 600); }
+      else toast(r.error || '失败', 'err');
+    },
+    async checkCookies() {
+      this.checking = true;
+      try {
+        const r = await api('/api/cookies-check', 'POST', {account_id: {{ acc.id }}});
+        if (r.status === 'ok') {
+          toast('✓ 登录态正常');
+        } else if (r.status === 'expired') {
+          toast('✗ 登录态已失效，请重新扫码', 'err');
+          setTimeout(()=>location.href='/accounts/{{ acc.id }}/login', 1500);
+        } else {
+          toast('⚠️ 体检返回: ' + r.status, 'err');
+        }
+      } finally { this.checking = false; }
+    },
+    batchSend() {
+      const boxes = document.querySelectorAll('.contact-select:checked');
+      if (!boxes.length) { toast('请先勾选联系人', 'err'); return; }
+      const targets = Array.from(boxes).map(x => ({
+        uid: x.value,
+        name: x.closest('tr').querySelector('.font-medium')?.textContent?.trim() || x.value,
+      }));
+      this.openSend(targets);
+    },
+  };
+}
+
+function toggleAll(el) {
+  document.querySelectorAll('.contact-select').forEach(x => { x.checked = el.checked; });
+  updateSelectedCount();
+}
+function updateSelectedCount() {
+  const n = document.querySelectorAll('.contact-select:checked').length;
+  if (window._accountPage) window._accountPage.selectedCount = n;
+}
+
+// 当前通用模板内容（页面加载时由后端注入；编辑后由 saveDefault 同步到前端缓存）
+let DEFAULT_MSGS = {{ (default_tpl.messages or [])|tojson }};
+
+function renderDefaultPreviews() {
+  const text = DEFAULT_MSGS.length
+    ? DEFAULT_MSGS.join('  /  ')
+    : '（通用模板未设置，留空时不会发送）';
+  document.querySelectorAll('.default-preview').forEach(el => { el.textContent = text; });
+}
+document.addEventListener('DOMContentLoaded', renderDefaultPreviews);
+
+function useDefault(tr) {
+  const ta = tr.querySelector('textarea.contact-msgs');
+  ta.value = DEFAULT_MSGS.join('\n');
+  saveTpl(tr.dataset.uid, tr);
+}
+
+async function saveTpl(uid, tr, enabledOverride) {
+  const en = (typeof enabledOverride === 'boolean')
+    ? enabledOverride
+    : tr.querySelector('input.toggle-enabled').checked;
+  const msgs = tr.querySelector('textarea.contact-msgs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const r = await api('/api/template/{{ acc.id }}/' + encodeURIComponent(uid), 'PUT', {enabled: en, messages: msgs});
+  toast(r.ok ? '已保存' : (r.error || '失败'), r.ok ? 'ok' : 'err');
+}
+async function saveDefault() {
+  const en = document.getElementById('def-en').checked;
+  const msgs = document.getElementById('def-msgs').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const r = await api('/api/template/{{ acc.id }}/default', 'PUT', {enabled: en, messages: msgs});
+  if (r.ok) {
+    DEFAULT_MSGS = msgs;
+    renderDefaultPreviews();
+  }
+  toast(r.ok ? '通用模板已保存' : r.error, r.ok ? 'ok' : 'err');
+}
+async function saveSchedule() {
+  const enabled = document.getElementById('sch-en').checked;
+  const time = document.getElementById('sch-time').value;
+  const r = await api('/api/schedule/{{ acc.id }}', 'PUT', {enabled, time});
+  toast(r.ok ? '定时已保存' : r.error, r.ok ? 'ok' : 'err');
+}
+function previewSend(uid, name) {
+  if (window._accountPage) {
+    window._accountPage.openSend([{uid, name}]);
+  } else {
+    toast('页面未就绪，请刷新', 'err');
+  }
+}
+</script>
+{% endblock %}

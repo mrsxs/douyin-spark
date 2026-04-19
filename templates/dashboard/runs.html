@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}运行历史 · {{ acc.label }}{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <div class="text-sm text-slate-500"><a href="/accounts/{{ acc.id }}" class="hover:underline">← {{ acc.nickname or acc.label }}</a></div>
+  <h1 class="text-2xl font-bold mt-1">运行历史</h1>
+  <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">定时触发 / 手动续火花 / 批量测试发送的全部执行记录（最近 {{ per_page }} 条，共 {{ total }}）</p>
+</div>
+
+{% if runs %}
+<div class="card overflow-x-auto -mx-4 sm:mx-0 sm:rounded-xl">
+  <table class="w-full min-w-[720px]">
+    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+      <tr>
+        <th class="px-4 py-3 text-left w-14">#</th>
+        <th class="px-4 py-3 text-left w-32">开始时间</th>
+        <th class="px-4 py-3 text-left w-24">类型</th>
+        <th class="px-4 py-3 text-left w-20">触发</th>
+        <th class="px-4 py-3 text-center w-20">状态</th>
+        <th class="px-4 py-3 text-center">结果</th>
+        <th class="px-4 py-3 text-left w-20">耗时</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+      {% for r in runs %}
+      {% set dur = ((r.finished_at - r.started_at).total_seconds() | int) if r.finished_at else None %}
+      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/20 cursor-pointer"
+          onclick="location.href='/accounts/{{ acc.id }}/runs/{{ r.id }}'">
+        <td class="px-4 py-3 text-sm text-slate-500">#{{ r.id }}</td>
+        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-400">{{ r.started_at.strftime("%m-%d %H:%M:%S") }}</td>
+        <td class="px-4 py-3">
+          {% if r.kind == "auto" %}
+            <span class="pill pill-indigo">自动</span>
+          {% elif r.kind == "manual_single" %}
+            <span class="pill pill-slate">单发</span>
+          {% elif r.kind == "manual_batch" %}
+            <span class="pill pill-amber">批量</span>
+          {% else %}
+            <span class="pill pill-slate">{{ r.kind }}</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-3 text-sm text-slate-500">{{ r.triggered_by }}</td>
+        <td class="px-4 py-3 text-center">
+          {% if r.status == "running" %}
+            <span class="pill pill-amber">运行中</span>
+          {% elif r.status == "done" %}
+            <span class="pill pill-green">完成</span>
+          {% else %}
+            <span class="pill pill-rose">{{ r.status }}</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-3 text-center text-sm">
+          <span class="text-emerald-600 dark:text-emerald-400">✓{{ r.sent }}</span>
+          {% if r.skipped %}<span class="text-slate-400 ml-2">跳过{{ r.skipped }}</span>{% endif %}
+          {% if r.failed %}<span class="text-rose-600 dark:text-rose-400 ml-2">✗{{ r.failed }}</span>{% endif %}
+        </td>
+        <td class="px-4 py-3 text-sm text-slate-500">{{ dur }}s{% if dur is none %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if total > per_page %}
+<div class="mt-4 flex justify-center gap-2 text-sm">
+  {% if page > 1 %}
+    <a href="?page={{ page - 1 }}" class="btn-sec">← 上一页</a>
+  {% endif %}
+  <span class="px-4 py-2 text-slate-500">第 {{ page }} 页，共 {{ (total / per_page)|round(0, 'ceil')|int }} 页</span>
+  {% if page * per_page < total %}
+    <a href="?page={{ page + 1 }}" class="btn-sec">下一页 →</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="card p-12 text-center text-slate-500">暂无运行记录</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+sqlalchemy>=2.0
+bcrypt
+passlib[bcrypt]
+itsdangerous
+pydantic-settings
+python-dotenv
+slowapi
+requests
+qrcode
+websocket-client
+playwright
+cryptography>=42.0

@@ -1,0 +1,76 @@
+{# 通用模板 macro 集合：统一 pill、modal 等样式 #}
+
+{#
+  status_pill: 状态 pill 的集中色彩映射
+
+  kind 可选：
+    - green / active / ok / success
+    - amber / warning / risk
+    - red / rose / error / expired / failed
+    - slate / idle / pending
+    - indigo / info / auto
+  label: 显示文字
+  icon: 可选 emoji / SVG 标签
+  title: hover tooltip
+  extra: 附加 class
+#}
+{% macro status_pill(kind, label, icon='', title='', extra='') %}
+  {% set colors = {
+    'green':   'pill-green',    'active':  'pill-green',  'ok':      'pill-green', 'success': 'pill-green',
+    'amber':   'pill-amber',    'warning': 'pill-amber',  'risk':    'pill-amber',
+    'red':     'pill-rose',     'rose':    'pill-rose',   'error':   'pill-rose',  'expired': 'pill-rose', 'failed':'pill-rose',
+    'slate':   'pill-slate',    'idle':    'pill-slate',  'pending': 'pill-slate',
+    'indigo':  'pill-indigo',   'info':    'pill-indigo', 'auto':    'pill-indigo',
+  } %}
+  {% set cls = colors.get(kind, 'pill-slate') %}
+  <span class="pill {{ cls }} {{ extra }}" {% if title %}title="{{ title }}"{% endif %}>
+    {% if icon %}{{ icon }} {% endif %}{{ label }}
+  </span>
+{% endmacro %}
+
+
+{#
+  modal_shell: 原生 <dialog> 外壳 + Alpine 同步
+  必传：ref (Alpine $refs 名字), toggle_var (Alpine 状态变量名)
+  可选：size=sm/md/lg、title、danger（标题区用红色）
+  body 放在 caller() 里
+#}
+{% macro modal_shell(ref, toggle_var, size='md', title=None, danger=False) %}
+  {% set widths = {'sm': 'max-w-sm', 'md': 'max-w-md', 'lg': 'max-w-lg', 'xl': 'max-w-xl', '2xl': 'max-w-2xl'} %}
+  {% set w = widths.get(size, 'max-w-md') %}
+<dialog x-ref="{{ ref }}"
+        x-effect="{{ toggle_var }} ? (!$refs.{{ ref }}.open && $refs.{{ ref }}.showModal()) : ($refs.{{ ref }}.open && $refs.{{ ref }}.close())"
+        @close="{{ toggle_var }}=false"
+        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full {{ w }}">
+  <div class="p-6">
+    {% if title %}
+      <h3 class="font-semibold text-lg mb-3 {% if danger %}text-rose-600 dark:text-rose-400{% endif %}">{{ title }}</h3>
+    {% endif %}
+    {{ caller() }}
+  </div>
+</dialog>
+{% endmacro %}
+
+
+{#
+  confirm_modal: 确认对话框（取消 + 确认双按钮）
+  必传：ref, toggle_var, title, body
+  可选：confirm_text (默认"确认")、cancel_text (默认"取消")、danger (按钮变红色)
+  confirm_action: 点击"确认"时执行的 Alpine 表达式（不含关闭 modal，macro 自己处理）
+#}
+{% macro confirm_modal(ref, toggle_var, title, body, confirm_action='', confirm_text='确认', cancel_text='取消', danger=False) %}
+<dialog x-ref="{{ ref }}"
+        x-effect="{{ toggle_var }} ? (!$refs.{{ ref }}.open && $refs.{{ ref }}.showModal()) : ($refs.{{ ref }}.open && $refs.{{ ref }}.close())"
+        @close="{{ toggle_var }}=false"
+        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full max-w-md">
+  <div class="p-6">
+    <h3 class="font-semibold text-lg mb-2">{{ title }}</h3>
+    <div class="text-sm text-slate-600 dark:text-slate-400 mb-4">{{ body }}</div>
+    <div class="flex justify-end gap-2">
+      <button type="button" @click="{{ toggle_var }}=false" class="btn-sec">{{ cancel_text }}</button>
+      <button type="button" @click="{{ toggle_var }}=false; {{ confirm_action }}"
+              class="btn-primary{% if danger %} !bg-rose-600 hover:!bg-rose-700{% endif %}">{{ confirm_text }}</button>
+    </div>
+  </div>
+</dialog>
+{% endmacro %}

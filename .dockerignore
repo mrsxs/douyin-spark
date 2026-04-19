@@ -1,0 +1,45 @@
+# 数据 / 敏感
+data/
+.env
+.env.local
+*.secret_key
+license_private_key.pem
+
+# 工具脚本（卖家本地用，不进镜像）
+tools/
+issue_license.py
+
+# 版本控制 & IDE
+.git/
+.gitignore
+.github/
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node modules（运行时用系统 node，不用项目自带）
+node_modules/
+
+# Playwright 旧 cache（Dockerfile 会重新装）
+.cache/
+
+# 测试 / 文档
+test_*.py
+README.md
+docs/
+*.md
+!CLAUDE.md
+
+# 临时文件
+*.log
+/tmp/

@@ -1,0 +1,58 @@
+# 数据 & 密钥
+data/
+.env
+.env.local
+
+# License 私钥（绝对禁止上传！签发 license 用）
+license_private_key.pem
+*.private_key.pem
+*_private_key.pem
+
+# Claude 配置（可能含 AWS/API 凭证）+ 整个 .claude 目录都排除
+.claude/
+
+# 老项目遗留的 Frida hook 脚本，与续火花业务无关
+__handlers__/
+
+# fetch_security.py 是本地调试脚本，不部署
+fetch_security.py
+test_fetch_http.py
+web_panel.py
+
+# CI / local output
+.github/*.local.yml
+
+# Node modules
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 项目运行时数据（含敏感信息，禁止提交）
+# 这些本身在 ~ 目录，gitignore 只是双保险
+*.douyin_cookies.json
+*.douyin_security.json
+*.douyin_init_req.bin
+*.douyin_contacts.json
+*.douyin_templates.json
+*.douyin_config.json
+*.douyin_logs/
+
+# 调试输出
+/tmp_*
+debug_*.py
+test_*.py
+fetch_security.py
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp

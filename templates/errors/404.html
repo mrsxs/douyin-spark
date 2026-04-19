@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="max-w-md mx-auto mt-24 text-center">
+  <div class="text-6xl font-bold text-slate-300 dark:text-slate-600">404</div>
+  <h1 class="text-xl font-semibold mt-4 mb-2">页面不存在</h1>
+  <p class="text-sm text-slate-600 dark:text-slate-400">{{ detail or "您访问的页面不存在或已被删除" }}</p>
+  <a href="/" class="btn-sec mt-6 inline-flex">返回首页</a>
+</div>
+{% endblock %}

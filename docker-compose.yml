@@ -1,0 +1,48 @@
+services:
+  app:
+    # 从 GHCR 私有仓库拉镜像（需要 docker login ghcr.io）
+    # 本地开发可改成 build: .
+    image: ghcr.io/YOUR_GITHUB_USERNAME/douyin-spark:latest
+    # build: .
+    container_name: douyin-spark
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # ─── 必填 ──────────────────────────────────
+      LICENSE_KEY: "${LICENSE_KEY:?LICENSE_KEY is required, get it from the seller}"
+
+      # ─── 可选：管理员（留空则容器首次启动自动生成并打印一次）──
+      ADMIN_USERNAME: admin
+      # ADMIN_PASSWORD_HASH: "$2b$12$..."
+
+      # ─── 可选：Session / Cookie ─────────────────
+      SECRET_KEY: ""              # 留空自动持久化到 /data/.secret_key
+      COOKIE_SECURE: "false"      # 生产 HTTPS 环境改 true
+      SESSION_MAX_AGE: "2592000"  # 30 天
+
+      # ─── 数据 ────────────────────────────────
+      DATA_DIR: /data
+      DB_URL: ""                  # 留空 → sqlite:///./data/app.db
+      SITE_NAME: "续火花"
+
+      # ─── 抖音签名基建 ────────────────────────
+      DOUYIN_CAPTCHA_URL: "${DOUYIN_CAPTCHA_URL:-http://ocr.example.com}"
+      DOUYIN_CAPTCHA_ENDPOINT: "/slide_match"
+      DOUYIN_CAPTCHA_KEY: "${DOUYIN_CAPTCHA_KEY:-}"
+
+      # ─── License 严格模式（绑机器，可选）────
+      # LICENSE_STRICT: "1"
+    volumes:
+      # 持久化：cookies / templates / sqlite DB / 日志
+      - spark-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  spark-data:
+    driver: local

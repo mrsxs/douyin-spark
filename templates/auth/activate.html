@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}兑换授权码 · {{ site_name }}{% endblock %}
+{% block content %}
+<div class="max-w-xl mx-auto mt-8 space-y-4">
+  <div class="mb-4">
+    {% include '_buy_cta.html' %}
+  </div>
+  <div class="card p-8">
+    {% if is_active %}
+      <div class="mb-6 p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg flex items-start gap-3">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6 text-emerald-600 shrink-0"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+        <div>
+          <div class="font-semibold text-emerald-800 dark:text-emerald-300">已激活</div>
+          <div class="text-sm text-emerald-700 dark:text-emerald-400 mt-1">
+            到期时间：<strong>{{ user.expires_at.strftime("%Y-%m-%d %H:%M") }}</strong>
+            · 还剩 <strong>{{ (user.expires_at - now).days }}</strong> 天
+            · 最多 <strong>{{ user.max_accounts }}</strong> 个抖音账户
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="mb-6 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg flex items-start gap-3">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6 text-amber-600 shrink-0"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
+        <div>
+          <div class="font-semibold text-amber-800 dark:text-amber-300">
+            {% if user.expires_at %}已过期{% else %}未激活{% endif %}
+          </div>
+          <div class="text-sm text-amber-700 dark:text-amber-400 mt-1">
+            请输入有效的授权码以{% if user.expires_at %}续期{% else %}开始使用{% endif %}。没有授权码？请联系管理员购买。
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <h1 class="text-2xl font-bold mb-2">{% if is_active %}续期{% else %}激活{% endif %}</h1>
+    <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">授权码单次使用，兑换后开始计时</p>
+
+    {% if error %}
+    <div class="mb-4 p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-lg text-sm text-rose-700 dark:text-rose-400">
+      {% if error == "code_format" %}授权码格式错误
+      {% elif error == "code_not_found" %}授权码不存在
+      {% elif error == "code_used" %}授权码已被使用
+      {% elif error == "code_revoked" %}授权码已被作废
+      {% else %}激活失败：{{ error }}{% endif %}
+    </div>
+    {% endif %}
+    {% if ok %}
+    <div class="mb-4 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg text-sm text-emerald-700 dark:text-emerald-400">
+      ✓ 激活成功！<a href="/dashboard" class="font-medium underline">立即前往 Dashboard →</a>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/activate" class="space-y-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <div>
+        <label class="label">授权码</label>
+        <input name="code" class="input uppercase font-mono tracking-widest text-center text-lg"
+               placeholder="XXXX-XXXX-XXXX-XXXX" autofocus required
+               oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')" />
+      </div>
+      <button type="submit" class="btn-primary w-full justify-center">兑换</button>
+    </form>
+
+    {% if is_active %}
+    <div class="mt-6 text-center">
+      <a href="/dashboard" class="btn-sec">返回 Dashboard</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}日志 · {{ acc.label }}{% endblock %}
+{% block content %}
+<div class="mb-4">
+  <div class="text-sm text-slate-500"><a href="/accounts/{{ acc.id }}" class="hover:underline">← 返回账户</a></div>
+  <h1 class="text-2xl font-bold mt-1">日志 · {{ acc.label }} · {{ day }}</h1>
+</div>
+
+<div class="card p-4 font-mono text-xs overflow-x-auto max-h-[75vh] overflow-y-auto">
+{% if lines %}
+  {% for line in lines %}
+    {% set cls = "slate" %}
+    {% if " SEND " in line %}{% set cls = "blue" %}
+    {% elif " OK " in line or " DONE " in line %}{% set cls = "emerald" %}
+    {% elif " FAIL " in line or " ERR " in line %}{% set cls = "rose" %}
+    {% elif " SKIP " in line or " WAIT " in line %}{% set cls = "amber" %}
+    {% endif %}
+    <div class="py-0.5 text-{{ cls }}-600 dark:text-{{ cls }}-400">{{ line.rstrip() }}</div>
+  {% endfor %}
+{% else %}
+  <div class="text-slate-500">暂无日志</div>
+{% endif %}
+</div>
+{% endblock %}

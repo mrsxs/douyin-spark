@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    安装：
+    1. 把 PROJECT_DIR 和 PYTHON_BIN 改成你的实际路径
+    2. cp contrib/com.douyin.keepalive.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.douyin.keepalive.plist
+
+    卸载：
+    launchctl unload ~/Library/LaunchAgents/com.douyin.keepalive.plist
+
+    默认每天早 9:00 运行，给所有启用的火花联系人按模板发消息。
+    -->
+    <key>Label</key>
+    <string>com.douyin.keepalive</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Python 路径，用 `which python3` 查 -->
+        <string>/usr/bin/python3</string>
+        <!-- 项目脚本绝对路径 -->
+        <string>/Users/apple/item/douyin_im.py</string>
+        <string>--auto</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/apple/item</string>
+
+    <!-- 每天早 9:00 跑一次 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- stdout/stderr 输出到日志（方便排查）-->
+    <key>StandardOutPath</key>
+    <string>/tmp/douyin_keepalive.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/douyin_keepalive.err.log</string>
+
+    <!-- 启动后如果失败了，10 分钟重试一次 -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- 让 Node / PATH 在启动时生效 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

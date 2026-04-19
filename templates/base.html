@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN" x-data="{ dark: localStorage.getItem('dark') === '1' }"
+      x-init="$watch('dark', v => localStorage.setItem('dark', v?'1':'0'))"
+      :class="{dark:dark}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>{% block title %}{{ site_name or "续火花" }}｜抖音自动续火花云端 省心省力{% endblock %}</title>
+
+  <!-- SEO -->
+  <meta name="description" content="{% block meta_description %}抖音自动续火花云端服务：每日定时自动发送消息保持火花不断，支持多账号管理、模板自定义、批量群发、账号健康监控。省心省力，云端 7×24 稳定运行。{% endblock %}" />
+  <meta name="keywords" content="{% block meta_keywords %}抖音续火花,抖音火花,自动续火花,抖音私信,抖音互动,抖音保号,火花维持,续火花工具,云端续火花,抖音自动化{% endblock %}" />
+  <meta name="author" content="{{ site_name or '续火花' }}" />
+  <meta name="robots" content="index,follow" />
+  <meta name="googlebot" content="index,follow" />
+  <meta name="renderer" content="webkit" />
+  <meta http-equiv="x-dns-prefetch-control" content="on" />
+  <link rel="canonical" href="{{ request.url }}" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{{ site_name or '续火花' }}｜抖音自动续火花云端 省心省力" />
+  <meta property="og:description" content="每日定时自动发送消息保持抖音火花不断，支持多账号、模板、批量群发。云端稳定运行。" />
+  <meta property="og:site_name" content="{{ site_name or '续火花' }}" />
+  <meta property="og:locale" content="zh_CN" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="{{ site_name or '续火花' }}｜抖音自动续火花云端" />
+  <meta name="twitter:description" content="每日定时自动发送消息保持抖音火花不断。云端稳定，省心省力。" />
+
+  <!-- 结构化数据 Schema.org -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "{{ site_name or '续火花' }}",
+    "description": "抖音自动续火花云端服务，支持多账号管理、定时发送、模板自定义、批量群发、账号健康监控。",
+    "applicationCategory": "BusinessApplication",
+    "operatingSystem": "Web",
+    "offers": {
+      "@type": "Offer",
+      "priceCurrency": "CNY"
+    }
+  }
+  </script>
+
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%234f46e5'%3E%3Cpath fill-rule='evenodd' d='M12.963 2.286a.75.75 0 0 0-1.071-.136 9.742 9.742 0 0 0-3.539 6.176 7.547 7.547 0 0 1-1.705-1.715.75.75 0 0 0-1.152-.082A9 9 0 1 0 15.68 4.534a7.46 7.46 0 0 1-2.717-2.248Z' clip-rule='evenodd' /%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef2ff', 100:'#e0e7ff', 200:'#c7d2fe', 300:'#a5b4fc',
+                     400:'#818cf8', 500:'#6366f1', 600:'#4f46e5', 700:'#4338ca',
+                     800:'#3730a3', 900:'#312e81' }
+          },
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui'] },
+        }
+      }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+  <style>
+    html { font-family: 'Inter', ui-sans-serif, system-ui; }
+    body { min-height: 100vh; }
+    [x-cloak] { display: none !important; }
+  </style>
+  <style type="text/tailwindcss">
+    @layer components {
+      .btn-primary { @apply inline-flex items-center justify-center gap-2 bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
+      .btn-sec { @apply inline-flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-900 dark:text-slate-100 px-4 py-2 rounded-lg text-sm font-medium transition border border-slate-200 dark:border-slate-600; }
+      .btn-danger { @apply inline-flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition; }
+      .btn-ghost { @apply inline-flex items-center gap-2 text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 px-3 py-2 rounded-lg text-sm font-medium transition hover:bg-slate-100 dark:hover:bg-slate-700; }
+      .card { @apply bg-white dark:bg-slate-800 rounded-xl shadow-sm ring-1 ring-slate-200 dark:ring-slate-700; }
+      .input { @apply w-full bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 border border-slate-300 dark:border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-slate-400 dark:placeholder:text-slate-500; }
+      .label { @apply block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5; }
+      .pill { @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium; }
+      .pill-green { @apply bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400; }
+      .pill-amber { @apply bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400; }
+      .pill-rose { @apply bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400; }
+      .pill-slate { @apply bg-slate-100 dark:bg-slate-700/50 text-slate-700 dark:text-slate-300; }
+      .pill-indigo { @apply bg-brand-100 dark:bg-brand-900/30 text-brand-700 dark:text-brand-400; }
+    }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 transition-colors">
+
+<!-- Navbar -->
+{% if show_nav|default(True) %}
+<nav class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-20">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex justify-between h-16 items-center">
+      <div class="flex items-center gap-8">
+        <a href="/" class="flex items-center gap-2 text-xl font-bold text-brand-600 dark:text-brand-400">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-7 h-7">
+            <path fill-rule="evenodd" d="M12.963 2.286a.75.75 0 0 0-1.071-.136 9.742 9.742 0 0 0-3.539 6.176 7.547 7.547 0 0 1-1.705-1.715.75.75 0 0 0-1.152-.082A9 9 0 1 0 15.68 4.534a7.46 7.46 0 0 1-2.717-2.248Z" clip-rule="evenodd" />
+          </svg>
+          <span>{{ site_name or "续火花" }}</span>
+        </a>
+        {% if user %}
+        <div class="hidden md:flex items-center gap-1">
+          <a href="/dashboard" class="btn-ghost {% if request.url.path.startswith('/dashboard') or request.url.path.startswith('/accounts') %}!text-brand-600 dark:!text-brand-400{% endif %}">我的账户</a>
+          {% if user.is_admin %}
+            <a href="/admin" class="btn-ghost {% if request.url.path.startswith('/admin') %}!text-brand-600 dark:!text-brand-400{% endif %}">管理后台</a>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="flex items-center gap-2">
+        <button @click="dark = !dark" class="btn-ghost" title="切换深色">
+          <svg x-show="!dark" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" /></svg>
+          <svg x-show="dark" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5" x-cloak><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" /></svg>
+        </button>
+        {% if user %}
+        <!-- 通知铃铛 -->
+        <div class="relative"
+             x-data="{
+               open: false, loading: false,
+               unread: {{ get_unread_notifications(request) or 0 }},
+               items: [],
+               async load() {
+                 this.loading = true;
+                 try {
+                   const r = await api('/api/notifications');
+                   if (r.ok) { this.items = r.items || []; this.unread = r.unread || 0; }
+                 } finally { this.loading = false; }
+               },
+               async markOne(id) {
+                 await api('/api/notifications/read', 'POST', {id});
+                 await this.load();
+               },
+               async markAll() {
+                 await api('/api/notifications/read', 'POST', {});
+                 await this.load();
+               }
+             }"
+             @click.outside="open=false">
+          <button @click="open=!open; if(open) load()" class="btn-ghost relative" title="通知"
+                  aria-label="通知" aria-haspopup="menu" :aria-expanded="open">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
+            <span x-show="unread > 0" x-text="unread > 99 ? '99+' : unread"
+                  class="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] leading-none min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1"></span>
+          </button>
+          <div x-show="open" x-transition x-cloak
+               class="absolute right-0 mt-2 w-96 max-h-[70vh] overflow-y-auto bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-slate-200 dark:ring-slate-700">
+            <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <div class="font-medium text-sm">通知 <span x-show="unread>0" x-text="'('+unread+'未读)'" class="text-xs text-rose-500"></span></div>
+              <button type="button" @click="markAll()" x-show="unread>0"
+                      class="text-xs text-brand-600 dark:text-brand-400 hover:underline">全部标为已读</button>
+            </div>
+            <template x-if="loading && items.length===0">
+              <div class="px-4 py-8 text-center text-sm text-slate-500">加载中...</div>
+            </template>
+            <template x-if="!loading && items.length===0">
+              <div class="px-4 py-8 text-center text-sm text-slate-500">暂无通知</div>
+            </template>
+            <template x-for="n in items" :key="n.id">
+              <div class="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/30 cursor-pointer"
+                   :class="!n.read ? 'bg-brand-50/50 dark:bg-brand-900/10' : ''"
+                   @click="if (!n.read) markOne(n.id); if (n.url) location.href=n.url">
+                <div class="flex items-start gap-2">
+                  <span x-show="!n.read" class="mt-1.5 w-2 h-2 rounded-full bg-brand-500 shrink-0"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium" x-text="n.title"></div>
+                    <div x-show="n.content" class="text-xs text-slate-600 dark:text-slate-400 mt-0.5" x-text="n.content"></div>
+                    <div class="text-[11px] text-slate-400 mt-1" x-text="(n.created_at||'').slice(0,16).replace('T',' ')"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div class="relative" x-data="{open:false}" @click.outside="open=false">
+          <button @click="open=!open" class="btn-ghost"
+                  aria-label="用户菜单" aria-haspopup="menu" :aria-expanded="open">
+            <span class="font-medium">{{ user.username }}</span>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
+          </button>
+          <div x-show="open" x-transition x-cloak
+               class="absolute right-0 mt-2 w-56 bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-slate-200 dark:ring-slate-700 py-1">
+            <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700">
+              <div class="text-sm font-medium">{{ user.username }}</div>
+              {% if user.is_admin %}<div class="text-xs text-brand-600 dark:text-brand-400">管理员</div>{% endif %}
+              {% if user.expires_at %}
+                <div class="text-xs text-slate-500 mt-1">到期: {{ user.expires_at.strftime("%Y-%m-%d") }}</div>
+              {% else %}
+                <div class="text-xs text-amber-600 mt-1">未激活</div>
+              {% endif %}
+            </div>
+            <a href="/activate" class="block px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700">兑换/续期授权码</a>
+            <form action="/logout" method="post" class="block">
+              <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-rose-600 dark:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-700">退出登录</button>
+            </form>
+          </div>
+        </div>
+        {% else %}
+          <a href="/login" class="btn-sec">登录</a>
+          <a href="/register" class="btn-primary">注册</a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</nav>
+{% endif %}
+
+<!-- Toast 容器 -->
+<div x-data="{items:[]}"
+     @toast.window="items.push({id:Date.now()+Math.random(),msg:$event.detail.msg,cls:$event.detail.cls}); setTimeout(()=>items.shift(), 4000)"
+     class="fixed top-20 right-4 z-50 space-y-2">
+  <template x-for="t in items" :key="t.id">
+    <div x-transition
+         class="card px-4 py-3 min-w-[200px] flex items-center gap-2 shadow-lg"
+         :class="t.cls==='ok' ? '!ring-emerald-300' : '!ring-rose-300'">
+      <span x-text="t.msg"></span>
+    </div>
+  </template>
+</div>
+
+<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+  {% block content %}{% endblock %}
+</main>
+
+{% block scripts %}{% endblock %}
+
+<script>
+// 全局 fetch helper
+// 读 cookie 里的 CSRF token（服务端通过 middleware 自动 set-cookie）
+window._getCsrf = () => {
+  const m = document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+};
+window.api = async (url, method='GET', body=null) => {
+  const headers = {'Content-Type':'application/json'};
+  if (method !== 'GET') headers['X-CSRF-Token'] = window._getCsrf();
+  const opts = { method, headers };
+  if (body !== null) opts.body = JSON.stringify(body);
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (e) {
+    return { ok:false, error:'网络错误: ' + (e && e.message || e) + '（后端服务是否在跑？）' };
+  }
+  if (!r.ok) {
+    const body = await r.text().catch(()=>'');
+    // 401: 未登录 → 自动跳登录
+    if (r.status === 401) {
+      window.toast && toast('登录状态已失效，即将跳转登录页', 'err');
+      setTimeout(() => { location.href = '/login'; }, 1200);
+      return { ok:false, error:'未登录' };
+    }
+    // 403 + CSRF: 令牌过期 → 提示刷新
+    if (r.status === 403 && /CSRF/i.test(body)) {
+      window.toast && toast('会话令牌已过期，页面将自动刷新', 'err');
+      setTimeout(() => { location.reload(); }, 1500);
+      return { ok:false, error:'CSRF token 过期' };
+    }
+    // 413: body 过大
+    if (r.status === 413) {
+      return { ok:false, error:'请求体过大，已被服务器拒绝' };
+    }
+    return { ok:false, error:`HTTP ${r.status}: ${(body||'').slice(0,200)}` };
+  }
+  try { return await r.json(); } catch(e) { return { ok:false, error:'非 JSON 响应' }; }
+};
+window.toast = (msg, cls='ok') => window.dispatchEvent(new CustomEvent('toast',{detail:{msg,cls}}));
+</script>
+
+</body>
+</html>

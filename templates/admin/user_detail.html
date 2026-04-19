@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}{{ target_user.username }} · 管理后台{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <div class="text-sm text-slate-500"><a href="/admin/users" class="hover:underline">← 用户</a></div>
+  <h1 class="text-2xl font-bold mt-1">{{ target_user.username }}
+    {% if target_user.is_admin %}<span class="pill pill-indigo ml-2">管理员</span>{% endif %}
+  </h1>
+  <div class="text-sm text-slate-500 mt-1">ID: {{ target_user.id }} · 注册于 {{ target_user.created_at.strftime("%Y-%m-%d %H:%M") if target_user.created_at else "-" }}</div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+  <div class="lg:col-span-2 space-y-6">
+
+    <!-- 状态卡 -->
+    <div class="card p-6">
+      <h2 class="font-semibold mb-4">许可状态</h2>
+      <dl class="grid grid-cols-2 gap-4 text-sm">
+        <div><dt class="text-slate-500">当前状态</dt>
+          <dd class="mt-1 font-medium">
+            {% if not target_user.is_active %}<span class="pill pill-slate">已禁用</span>
+            {% elif target_user.expires_at and target_user.expires_at > now %}<span class="pill pill-green">活跃</span>
+            {% else %}<span class="pill pill-rose">过期</span>{% endif %}
+          </dd>
+        </div>
+        <div><dt class="text-slate-500">到期时间</dt>
+          <dd class="mt-1 font-medium">{% if target_user.expires_at %}{{ target_user.expires_at.strftime("%Y-%m-%d %H:%M") }}{% else %}-{% endif %}</dd>
+        </div>
+        <div><dt class="text-slate-500">最多账户</dt><dd class="mt-1 font-medium">{{ target_user.max_accounts }}</dd></div>
+        <div><dt class="text-slate-500">已登录账户</dt><dd class="mt-1 font-medium">{{ accounts|length }}</dd></div>
+      </dl>
+      <div class="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700 space-y-3">
+        <form method="post" action="/admin/users/{{ target_user.id }}/extend" class="flex items-center gap-2">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="number" name="days" placeholder="延长天数" class="input !w-32" min="1" required />
+          <button class="btn-primary text-sm">延长到期时间</button>
+        </form>
+        <form method="post" action="/admin/users/{{ target_user.id }}/max-accounts" class="flex items-center gap-2">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="number" name="max_accounts" value="{{ target_user.max_accounts }}" class="input !w-32" min="0" required />
+          <button class="btn-sec text-sm">更新最大账户数</button>
+        </form>
+        <form method="post" action="/admin/users/{{ target_user.id }}/reset-password" class="flex items-center gap-2"
+              onsubmit="return confirm('确认重置 {{ target_user.username }} 的密码？')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="text" name="new_password" placeholder="新密码" class="input !w-40" minlength="6" required />
+          <button class="btn-sec text-sm">重置密码</button>
+        </form>
+        {% if not target_user.is_admin %}
+        <form method="post" action="/admin/users/{{ target_user.id }}/toggle-active"
+              onsubmit="return confirm('确认切换该用户的启用状态？')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button class="btn-danger text-sm">
+            {% if target_user.is_active %}禁用用户{% else %}启用用户{% endif %}
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- 抖音账户 -->
+    <div class="card overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 font-semibold">
+        抖音账户 ({{ accounts|length }})
+      </div>
+      {% if accounts %}
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+          <tr>
+            <th class="px-4 py-2 text-left">名字</th><th class="px-4 py-2 text-left">昵称</th>
+            <th class="px-4 py-2">状态</th><th class="px-4 py-2 text-left">最后运行</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+          {% for a in accounts %}
+          <tr>
+            <td class="px-4 py-2 font-medium">{{ a.label }}</td>
+            <td class="px-4 py-2 text-slate-500">{{ a.nickname or "-" }}</td>
+            <td class="px-4 py-2 text-center"><span class="pill pill-slate">{{ a.status }}</span></td>
+            <td class="px-4 py-2 text-slate-500 text-xs">{{ a.last_run_at.strftime("%Y-%m-%d %H:%M") if a.last_run_at else "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="px-5 py-8 text-center text-slate-500 text-sm">该用户没有抖音账户</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="space-y-6">
+    <!-- 授权码历史 -->
+    <div class="card overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 font-semibold">使用过的授权码</div>
+      {% if codes %}
+      <ul class="divide-y divide-slate-200 dark:divide-slate-700">
+        {% for c in codes %}
+        <li class="px-5 py-3 text-sm">
+          <div class="font-mono">{{ c.code }}</div>
+          <div class="text-xs text-slate-500 mt-1">
+            +{{ c.duration_days }}天 · 上限{{ c.max_accounts }} · {{ c.used_at.strftime("%Y-%m-%d") if c.used_at else "-" }}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="px-5 py-6 text-center text-slate-500 text-sm">未使用过授权码</div>
+      {% endif %}
+    </div>
+
+    <!-- 最近活动 -->
+    <div class="card overflow-hidden">
+      <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 font-semibold">最近活动</div>
+      <ul class="divide-y divide-slate-200 dark:divide-slate-700 text-sm max-h-80 overflow-y-auto">
+        {% for l in logs %}
+        <li class="px-5 py-2">
+          <div class="flex justify-between">
+            <span class="pill pill-slate">{{ l.action }}</span>
+            <span class="text-xs text-slate-500">{{ l.ts.strftime("%m-%d %H:%M") }}</span>
+          </div>
+          {% if l.meta %}<div class="text-xs text-slate-500 mt-1 font-mono">{{ l.meta }}</div>{% endif %}
+        </li>
+        {% else %}
+        <li class="px-5 py-6 text-center text-slate-500">暂无</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}
