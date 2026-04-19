@@ -241,12 +241,16 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
     dy._log(f"[auto] DONE {summary}", "DONE")
 
     # 更新 JobRun + 原有 DB 记录 + 失败时发站内通知
+    # status：整次失败（0 条发出 + 有失败）→ error，否则 done
+    final_status = "error" if (sent == 0 and failed > 0) else "done"
     with SessionLocal() as db:
         run = db.get(JobRun, run_id)
         if run:
             run.finished_at = datetime.utcnow()
             run.sent = sent; run.skipped = skipped; run.failed = failed
-            run.status = "done"
+            run.status = final_status
+            if final_status == "error" and not run.error:
+                run.error = f"all_failed: sent=0 failed={failed}"
         acc = db.get(DouyinAccount, account_id)
         if acc:
             acc.last_run_at = datetime.utcnow()
@@ -258,18 +262,50 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
                         target_id=str(account_id),
                         meta=json.dumps({**summary, "run_id": run_id})))
 
-        # 通知：全失败 / 部分失败 / 全成功
+        # 通知：全失败 / 部分失败（仅站内通知，不每次都发邮件；
+        # 达到当日重试上限时由 scheduler 统一发一封邮件提醒）
         acc_label = (acc.nickname or acc.label) if acc else f"账户#{account_id}"
         if failed > 0 and sent == 0 and (sent + failed) > 0:
             notify(db, user_id=user_id, kind="send_failed",
                    title=f"⚠️ {acc_label} 自动发送全部失败",
                    content=f"本次任务 {failed} 条全部失败。可能是 cookies 失效或被风控。",
-                   url=f"/accounts/{account_id}/runs/{run_id}")
+                   url=f"/accounts/{account_id}/runs/{run_id}",
+                   email=False)
         elif failed > 0:
             notify(db, user_id=user_id, kind="send_failed",
                    title=f"⚠️ {acc_label} 部分发送失败",
                    content=f"送达 {sent}，失败 {failed}。点击查看详情。",
-                   url=f"/accounts/{account_id}/runs/{run_id}")
+                   url=f"/accounts/{account_id}/runs/{run_id}",
+                   email=False)
+
+        # 今日累计失败达到上限 → 发一次邮件通知（每账户每日最多一封）
+        if final_status == "error":
+            from datetime import timedelta
+            from .models import Notification
+            since_utc = datetime.utcnow() - timedelta(hours=24)
+            error_today = (db.query(JobRun)
+                             .filter(JobRun.douyin_account_id == account_id,
+                                     JobRun.kind == "auto",
+                                     JobRun.status == "error",
+                                     JobRun.started_at >= since_utc)
+                             .count())
+            MAX_DAILY_RETRIES = 3
+            if error_today >= MAX_DAILY_RETRIES:
+                # 今日是否已发过 retry_exhausted 通知（同时也是邮件）
+                already_sent = (db.query(Notification.id)
+                                  .filter(Notification.user_id == user_id,
+                                          Notification.kind == "retry_exhausted",
+                                          Notification.created_at >= since_utc)
+                                  .first())
+                if not already_sent:
+                    notify(db, user_id=user_id, kind="retry_exhausted",
+                           title=f"🔴 {acc_label} 定时发送今日已失败 {error_today} 次，已停止重试",
+                           content=(f"账户 {acc_label} 的定时任务今日累计失败 {error_today} 次，"
+                                    f"已达到每日重试上限 {MAX_DAILY_RETRIES}，剩余时间不再自动重试。\n"
+                                    "常见原因：cookies 失效 / 被风控 / 模板为空。\n"
+                                    "请登录后台查看最近几次 JobRun 详情并排查。"),
+                           url=f"/accounts/{account_id}/runs/{run_id}",
+                           email=True)
 
         db.commit()
     return summary
