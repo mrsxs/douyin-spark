@@ -82,16 +82,35 @@ def _send_email_blocking(to_addr: str, subject: str, body: str,
     msg.set_content(body)
     port = int(c.get("port", 587))
     use_ssl = (port == 465) or (str(c.get("mode", "")).lower() == "ssl")
+
+    def _auth_login(s: smtplib.SMTP) -> None:
+        # 某些服务商（QQ 等）对 AUTH PLAIN with initial-response 不兼容，会直接
+        # 断开连接。强制用 AUTH LOGIN（两轮交互）最稳：先发 Username(base64)，
+        # 再发 Password(base64)。
+        import base64
+        code, resp = s.docmd("AUTH", "LOGIN")
+        if code != 334:
+            raise smtplib.SMTPAuthenticationError(code, resp)
+        code, resp = s.docmd(base64.b64encode(c["user"].encode()).decode())
+        if code != 334:
+            raise smtplib.SMTPAuthenticationError(code, resp)
+        code, resp = s.docmd(base64.b64encode(c["password"].encode()).decode())
+        if code not in (235, 250):
+            raise smtplib.SMTPAuthenticationError(code, resp)
+
     try:
         if use_ssl:
             with smtplib.SMTP_SSL(c["host"], port, timeout=15) as s:
-                s.login(c["user"], c["password"])
+                s.ehlo()
+                _auth_login(s)
                 s.send_message(msg)
         else:
             with smtplib.SMTP(c["host"], port, timeout=15) as s:
+                s.ehlo()
                 if c.get("tls", True):
                     s.starttls()
-                s.login(c["user"], c["password"])
+                    s.ehlo()
+                _auth_login(s)
                 s.send_message(msg)
         return True, ""
     except Exception as e:
