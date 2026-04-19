@@ -1536,9 +1536,11 @@ def _build_body(conv_id: str, text: str, contact: dict, c: dict, security: dict)
     req_body = _pb_b(100, inner)
 
     # 外层 Request 常量
+    # ⭐ ts_sign / sdk_cert 优先从 security.json（localStorage 抽取）取，
+    # 其次从 init_req.bin 取（老抖音协议）。新抖音已不在 init_req 放这俩。
     token      = c.get("hash", "")                                     # session token
-    ts_sign    = c.get("ts_sign", "")
-    sdk_cert   = c.get("sdk_cert", "")
+    ts_sign    = security.get("ts_sign") or c.get("ts_sign", "")
+    sdk_cert   = security.get("client_cert") or c.get("sdk_cert", "")
     build_no   = c.get("trace_id", "5fa6ff1:Detached: 5fa6ff1111fd53aafc4c753505d3c93daad74d27")
     webid      = c.get("webid", "0")
     private_key = security.get("private_key", "")
