@@ -81,9 +81,9 @@ ENV PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
     DATA_DIR=/data
 
-# 运行时系统依赖（Node.js 给 douyin_im 的签名 JS 用 + Playwright 浏览器运行时）
+# 运行时系统依赖（Node.js + npm 给 douyin_im 的签名 JS 用 + Playwright 浏览器运行时）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      nodejs \
+      nodejs npm \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
       libgbm1 libpango-1.0-0 libcairo2 libasound2 libx11-xcb1 libxcb-dri3-0 \
@@ -100,6 +100,13 @@ COPY --from=builder /build /app
 
 # 从 playwright-setup 拷入 chromium 浏览器
 COPY --from=playwright-setup /root/.cache/ms-playwright /opt/playwright-browsers
+
+# ⭐ 关键：装 node 包（jsrsasign），否则 dy_signer.js 签名会失败
+# 签名失败抖音虽返回 OK 但消息实际不投递（"幽灵发送"）
+COPY package.json /app/package.json
+RUN cd /app && npm install --omit=dev --no-audit --no-fund 2>&1 | tail -5 \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 # 入口脚本
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
