@@ -60,8 +60,12 @@ def _loop():
             now = datetime.now()                       # 容器本地时间（TZ=Shanghai）
             hhmm = now.strftime("%H:%M")
             today = now.strftime("%Y-%m-%d")
-            # JobRun.started_at 存 UTC，用"最近 24 小时"作为"今日"的保守窗口
-            since_utc = datetime.utcnow() - timedelta(hours=24)
+            # JobRun.started_at 存 naive UTC。"今日"按本地自然日计算：
+            # 本地 00:00 对应的 UTC 时刻，避免用"最近 24h"滑动窗口
+            # 导致触发时间逐日漂移或卡在前一日 done 的 24h 内。
+            tz_offset = datetime.now() - datetime.utcnow()        # 本地 - UTC（Shanghai ≈ +8h）
+            local_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_utc = local_midnight - tz_offset          # naive UTC
             stale_cutoff_utc = datetime.utcnow() - timedelta(minutes=RUNNING_STALE_MINUTES)
 
             with SessionLocal() as db:
@@ -77,13 +81,9 @@ def _loop():
                           .all())
                 for sch, acc, user in rows:
                     # ① 今天已经成功 done 过 → 跳过
-                    done_today = (db.query(JobRun.id)
-                                    .filter(JobRun.douyin_account_id == acc.id,
-                                            JobRun.kind == "auto",
-                                            JobRun.status == "done",
-                                            JobRun.started_at >= since_utc)
-                                    .first())
-                    if done_today:
+                    # last_ran_date 由 trigger.auto_run 在 final_status=="done" 时写入
+                    # 用户改 time_hhmm 时 api.py 会清空 last_ran_date，允许同日在新时间再触发
+                    if sch.last_ran_date == today:
                         continue
                     # ② 还有活跃的 running（未超过 stale 阈值）→ 跳过，等它结束
                     active_running = (db.query(JobRun.id)
@@ -99,7 +99,7 @@ def _loop():
                                      .filter(JobRun.douyin_account_id == acc.id,
                                              JobRun.kind == "auto",
                                              JobRun.status == "error",
-                                             JobRun.started_at >= since_utc)
+                                             JobRun.started_at >= today_start_utc)
                                      .count())
                     if error_today >= MAX_DAILY_RETRIES:
                         continue
@@ -114,9 +114,8 @@ def _loop():
                                           .first())
                         if recent_error:
                             continue
-                    # ⑤ 保留 last_ran_date 更新仅作 UI 展示，不再做触发判断
-                    sch.last_ran_date = today
-                    db.commit()
+                    # ⑤ last_ran_date 不在这里写入（由 trigger.auto_run 成功时才写）
+                    #   —— 避免失败后仍被标记为"今日已跑"导致次日不重试
                     retry_hint = f" retry={error_today}" if error_today else ""
                     print(f"[scheduler] trigger user={user.id} account={acc.id} "
                           f"sched_time={sch.time_hhmm} now={hhmm}{retry_hint}")

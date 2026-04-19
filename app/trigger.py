@@ -257,6 +257,9 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
         sch = db.query(Schedule).filter(Schedule.douyin_account_id == account_id).first()
         if sch:
             sch.last_result = json.dumps(summary)
+            # 只在本次 auto_run 成功时标记"今日已跑"，避免失败后次日不重试
+            if final_status == "done":
+                sch.last_ran_date = datetime.now().strftime("%Y-%m-%d")
         db.add(AuditLog(actor_user_id=user_id, actor_kind="system",
                         action="auto_run", target_type="account",
                         target_id=str(account_id),
@@ -282,12 +285,15 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
         if final_status == "error":
             from datetime import timedelta
             from .models import Notification
-            since_utc = datetime.utcnow() - timedelta(hours=24)
+            # "今日"按本地自然日计算（与 scheduler._loop 保持一致）
+            _now_local = datetime.now()
+            _tz_offset = _now_local - datetime.utcnow()
+            today_start_utc = _now_local.replace(hour=0, minute=0, second=0, microsecond=0) - _tz_offset
             error_today = (db.query(JobRun)
                              .filter(JobRun.douyin_account_id == account_id,
                                      JobRun.kind == "auto",
                                      JobRun.status == "error",
-                                     JobRun.started_at >= since_utc)
+                                     JobRun.started_at >= today_start_utc)
                              .count())
             MAX_DAILY_RETRIES = 3
             if error_today >= MAX_DAILY_RETRIES:
@@ -295,7 +301,7 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
                 already_sent = (db.query(Notification.id)
                                   .filter(Notification.user_id == user_id,
                                           Notification.kind == "retry_exhausted",
-                                          Notification.created_at >= since_utc)
+                                          Notification.created_at >= today_start_utc)
                                   .first())
                 if not already_sent:
                     notify(db, user_id=user_id, kind="retry_exhausted",

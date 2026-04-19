@@ -331,6 +331,9 @@ def api_set_schedule(
     if not sch:
         sch = Schedule(douyin_account_id=acc.id)
         db.add(sch)
+    # 改了发送时间 → 清空"今日已跑"标记，让新时间点还能触发
+    if sch.time_hhmm != t:
+        sch.last_ran_date = None
     sch.enabled = enabled
     sch.time_hhmm = t
     db.add(AuditLog(actor_user_id=user.id, actor_kind="user", action="schedule_update",
