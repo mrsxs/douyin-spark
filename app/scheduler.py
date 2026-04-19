@@ -22,6 +22,8 @@ from . import trigger
 MAX_DAILY_RETRIES = 3
 # 判断"正在跑"的窗口：超过此时长的 running 视为卡死，不再阻塞新触发
 RUNNING_STALE_MINUTES = 15
+# 失败后退避：上次 error 在此窗口内则暂不重试（避免持续击打风控）
+RETRY_BACKOFF_MINUTES = 5
 
 
 _STOP = threading.Event()
@@ -101,7 +103,18 @@ def _loop():
                                      .count())
                     if error_today >= MAX_DAILY_RETRIES:
                         continue
-                    # ④ 保留 last_ran_date 更新仅作 UI 展示，不再做触发判断
+                    # ④ 失败后退避：最近一次 error 在 RETRY_BACKOFF_MINUTES 分钟内则暂不重试
+                    if error_today > 0:
+                        backoff_cutoff_utc = datetime.utcnow() - timedelta(minutes=RETRY_BACKOFF_MINUTES)
+                        recent_error = (db.query(JobRun.started_at)
+                                          .filter(JobRun.douyin_account_id == acc.id,
+                                                  JobRun.kind == "auto",
+                                                  JobRun.status == "error",
+                                                  JobRun.started_at >= backoff_cutoff_utc)
+                                          .first())
+                        if recent_error:
+                            continue
+                    # ⑤ 保留 last_ran_date 更新仅作 UI 展示，不再做触发判断
                     sch.last_ran_date = today
                     db.commit()
                     retry_hint = f" retry={error_today}" if error_today else ""
