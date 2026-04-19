@@ -2,7 +2,7 @@ services:
   app:
     # 从 GHCR 私有仓库拉镜像（需要 docker login ghcr.io）
     # 本地开发可改成 build: .
-    image: ghcr.io/YOUR_GITHUB_USERNAME/douyin-spark:latest
+    image: ghcr.io/mrsxs/douyin-spark:latest
     # build: .
     container_name: douyin-spark
     restart: unless-stopped
