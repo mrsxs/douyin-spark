@@ -143,8 +143,30 @@ def auto_run(user_id: int, account_id: int, triggered_by: str = "scheduler") -> 
 
 
 def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
-    ctx = AccountCtx(user_id=user_id, account_id=account_id)
-    session, constants, contacts = _ensure_active(ctx)
+    # 先建 JobRun，确保任何异常都能被记账（便于 scheduler 判断"今日失败次数"）
+    with SessionLocal() as db:
+        run = JobRun(douyin_account_id=account_id, kind="auto",
+                     triggered_by=triggered_by, status="running")
+        db.add(run); db.commit(); db.refresh(run)
+        run_id = run.id
+
+    try:
+        ctx = AccountCtx(user_id=user_id, account_id=account_id)
+        session, constants, contacts = _ensure_active(ctx)
+    except Exception as e:
+        # cookies 失效 / init_req 缺失等前置错误：立即把 JobRun 标 error
+        try:
+            with SessionLocal() as db:
+                r = db.get(JobRun, run_id)
+                if r:
+                    r.status = "error"
+                    r.finished_at = datetime.utcnow()
+                    r.error = f"setup: {type(e).__name__}: {e}"[:500]
+                    db.commit()
+        except Exception:
+            pass
+        raise
+
     from . import templates_service
     templates = templates_service.load_templates(account_id)
     if not templates:
@@ -152,13 +174,6 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
             templates = json.load(open(str(dy.TEMPLATES_FILE)))
         except Exception:
             templates = {}
-
-    # 创建 JobRun 记录
-    with SessionLocal() as db:
-        run = JobRun(douyin_account_id=account_id, kind="auto",
-                     triggered_by=triggered_by, status="running")
-        db.add(run); db.commit(); db.refresh(run)
-        run_id = run.id
 
     sent = skipped = failed = 0
     # 基于近期失败率自适应限速；随机 ±0.5s jitter 更像人工操作

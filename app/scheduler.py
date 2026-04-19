@@ -3,18 +3,25 @@ DB 驱动的后台定时调度：每 30s 扫一遍，到点触发续火花。
 - 过期用户（expires_at < now）自动被 SQL 过滤掉
 - 禁用用户（is_active=False）同上
 - 每个账户一线程，不互相阻塞
-- 当日重复触发通过 Schedule.last_ran_date 防御
+- 重复/并发触发通过 JobRun 状态判断（不再依赖 last_ran_date，该字段仅用于 UI 展示）
+- 错过整点那一分钟也能补跑（time_hhmm <= 当前时间且今日未 done）
 """
 import time
 import threading
 import traceback
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .models import Schedule, DouyinAccount, User
+from .models import Schedule, DouyinAccount, User, JobRun
 from .notify import notify
 from . import trigger
+
+
+# 每日失败重试上限：避免 auto_run 持续失败时死循环触发
+MAX_DAILY_RETRIES = 3
+# 判断"正在跑"的窗口：超过此时长的 running 视为卡死，不再阻塞新触发
+RUNNING_STALE_MINUTES = 15
 
 
 _STOP = threading.Event()
@@ -45,38 +52,61 @@ def _run_one(user_id: int, account_id: int):
 
 
 def _loop():
-    from sqlalchemy import or_
+    from sqlalchemy import or_, and_
     while not _STOP.is_set():
         try:
-            now = datetime.now()
+            now = datetime.now()                       # 容器本地时间（TZ=Shanghai）
             hhmm = now.strftime("%H:%M")
             today = now.strftime("%Y-%m-%d")
+            # JobRun.started_at 存 UTC，用"最近 24 小时"作为"今日"的保守窗口
+            since_utc = datetime.utcnow() - timedelta(hours=24)
+            stale_cutoff_utc = datetime.utcnow() - timedelta(minutes=RUNNING_STALE_MINUTES)
+
             with SessionLocal() as db:
+                # time_hhmm <= 当前时间 → 允许错过那一分钟后补跑（直到跨日）
                 rows = (db.query(Schedule, DouyinAccount, User)
                           .join(DouyinAccount, Schedule.douyin_account_id == DouyinAccount.id)
                           .join(User, DouyinAccount.user_id == User.id)
                           .filter(Schedule.enabled == True,
-                                  Schedule.time_hhmm == hhmm,
+                                  Schedule.time_hhmm <= hhmm,
                                   User.is_active == True,
                                   User.expires_at > datetime.utcnow(),
                                   DouyinAccount.status == "active")
                           .all())
                 for sch, acc, user in rows:
-                    if sch.last_ran_date == today:
+                    # ① 今天已经成功 done 过 → 跳过
+                    done_today = (db.query(JobRun.id)
+                                    .filter(JobRun.douyin_account_id == acc.id,
+                                            JobRun.kind == "auto",
+                                            JobRun.status == "done",
+                                            JobRun.started_at >= since_utc)
+                                    .first())
+                    if done_today:
                         continue
-                    # 原子 claim：只有当数据库里 last_ran_date 仍不是 today 才更新成功
-                    # 多进程/多 worker 同时扫到同一行时，只有一个 UPDATE 能 rowcount=1
-                    updated = (db.query(Schedule)
-                                 .filter(Schedule.id == sch.id,
-                                         or_(Schedule.last_ran_date.is_(None),
-                                             Schedule.last_ran_date != today))
-                                 .update({"last_ran_date": today},
-                                         synchronize_session=False))
+                    # ② 还有活跃的 running（未超过 stale 阈值）→ 跳过，等它结束
+                    active_running = (db.query(JobRun.id)
+                                        .filter(JobRun.douyin_account_id == acc.id,
+                                                JobRun.kind == "auto",
+                                                JobRun.status == "running",
+                                                JobRun.started_at >= stale_cutoff_utc)
+                                        .first())
+                    if active_running:
+                        continue
+                    # ③ 今日已失败次数超过上限 → 跳过，避免死循环
+                    error_today = (db.query(JobRun.id)
+                                     .filter(JobRun.douyin_account_id == acc.id,
+                                             JobRun.kind == "auto",
+                                             JobRun.status == "error",
+                                             JobRun.started_at >= since_utc)
+                                     .count())
+                    if error_today >= MAX_DAILY_RETRIES:
+                        continue
+                    # ④ 保留 last_ran_date 更新仅作 UI 展示，不再做触发判断
+                    sch.last_ran_date = today
                     db.commit()
-                    if updated != 1:
-                        # 被别的进程抢到了
-                        continue
-                    print(f"[scheduler] trigger user={user.id} account={acc.id} time={hhmm}")
+                    retry_hint = f" retry={error_today}" if error_today else ""
+                    print(f"[scheduler] trigger user={user.id} account={acc.id} "
+                          f"sched_time={sch.time_hhmm} now={hhmm}{retry_hint}")
                     threading.Thread(
                         target=_run_one,
                         args=(user.id, acc.id),
@@ -176,9 +206,27 @@ _thread: threading.Thread | None = None
 _health_thread: threading.Thread | None = None
 
 
+def _cleanup_stale_runs():
+    """启动时回收上次进程崩溃遗留的 running JobRun，避免永久阻塞触发"""
+    try:
+        with SessionLocal() as db:
+            n = (db.query(JobRun)
+                   .filter(JobRun.status == "running")
+                   .update({"status": "error",
+                            "finished_at": datetime.utcnow(),
+                            "error": "process-restart-cleanup"},
+                           synchronize_session=False))
+            db.commit()
+            if n:
+                print(f"[scheduler] 清理遗留 running 任务 {n} 条")
+    except Exception as e:
+        print(f"[scheduler] 启动清理失败: {e}")
+
+
 def start():
     """在 FastAPI startup 时调用，拉起后台线程"""
     global _thread, _health_thread
+    _cleanup_stale_runs()
     if not (_thread and _thread.is_alive()):
         _thread = threading.Thread(target=_loop, daemon=True, name="scheduler")
         _thread.start()
