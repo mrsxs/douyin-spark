@@ -64,7 +64,14 @@ def _smtp_ready(cfg: dict | None = None) -> bool:
 
 def _send_email_blocking(to_addr: str, subject: str, body: str,
                          cfg: dict | None = None) -> tuple[bool, str]:
-    """同步发送邮件 — 返回 (ok, error_msg)"""
+    """同步发送邮件 — 返回 (ok, error_msg)
+
+    协议自动选择：
+    - port=465（常规 SMTPS）→ 直接 SSL 握手（SMTP_SSL），无视 tls 开关
+    - port=587 / 25 → STARTTLS（tls=True）或明文（tls=False）
+    - 其他端口 → 跟随 tls 开关，默认 STARTTLS
+    避免用户"端口 465 + tls=true"的常见误配导致超时。
+    """
     c = cfg if cfg is not None else get_smtp_config()
     if not _smtp_ready(c):
         return False, "SMTP 未配置或未启用"
@@ -73,19 +80,22 @@ def _send_email_blocking(to_addr: str, subject: str, body: str,
     msg["From"]    = c.get("from") or c["user"]
     msg["To"]      = to_addr
     msg.set_content(body)
+    port = int(c.get("port", 587))
+    use_ssl = (port == 465) or (str(c.get("mode", "")).lower() == "ssl")
     try:
-        if c.get("tls", True):
-            with smtplib.SMTP(c["host"], int(c.get("port", 587)), timeout=15) as s:
-                s.starttls()
+        if use_ssl:
+            with smtplib.SMTP_SSL(c["host"], port, timeout=15) as s:
                 s.login(c["user"], c["password"])
                 s.send_message(msg)
         else:
-            with smtplib.SMTP_SSL(c["host"], int(c.get("port", 465)), timeout=15) as s:
+            with smtplib.SMTP(c["host"], port, timeout=15) as s:
+                if c.get("tls", True):
+                    s.starttls()
                 s.login(c["user"], c["password"])
                 s.send_message(msg)
         return True, ""
     except Exception as e:
-        print(f"[notify] SMTP 发送失败: {e}")
+        print(f"[notify] SMTP 发送失败 host={c.get('host')} port={port} ssl={use_ssl}: {e}")
         traceback.print_exc()
         return False, str(e)
 
