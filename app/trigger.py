@@ -198,7 +198,9 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
             if item_ok:
                 sent += 1
                 consecutive_fail = 0
-                item_detail = f"OK (msg={info.get('msg','')})"
+                # extras 里往往藏风控/限流码（OK 但被静默丢弃时的信号）
+                _extras = info.get('extras') or {}
+                item_detail = f"OK (msg={info.get('msg','')}" + (f" extras={_extras}" if _extras else "") + ")"
                 dy._log(f"[auto] ✓ {c['nickname']}: {msg!r}", "SEND")
             else:
                 failed += 1

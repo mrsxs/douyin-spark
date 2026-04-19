@@ -1694,7 +1694,11 @@ def send_text(session: requests.Session, conv_id: str, text: str,
                 if extras:
                     _update_send_info(extras=extras)
                 if msg == "OK" and (not edesc or edesc == "0"):
-                    print(f"  ✓ 发送成功 (server: OK)")
+                    # 把 extras 也打出来：OK 但被悄悄丢消息时，风控码往往藏在这里
+                    if extras:
+                        print(f"  ✓ 发送成功 (server: OK) extras={extras}")
+                    else:
+                        print(f"  ✓ 发送成功 (server: OK)")
                     _update_send_info(ok=True)
                     return True
                 print(f"  ✗ 服务端拒绝: message={msg!r} error_desc={edesc!r}")
