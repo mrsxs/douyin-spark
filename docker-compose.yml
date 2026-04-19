@@ -6,6 +6,11 @@ services:
     container_name: douyin-spark
     # 固定容器 MAC：保证机器码（基于 MAC 派生）跨重建稳定
     mac_address: "02:42:ac:de:ad:01"
+    # 固定 DNS 避免系统 DNS 瞬断导致 imapi.douyin.com 解析失败
+    dns:
+      - 223.5.5.5        # 阿里 DNS（国内首选）
+      - 114.114.114.114  # 114 DNS（备用）
+      - 8.8.8.8          # Google（海外备用）
     restart: unless-stopped
     ports:
       - "8765:8765"
