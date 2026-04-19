@@ -206,9 +206,10 @@ with SessionLocal() as db:
     print(msg)
     print('hash 前缀:', h[:30] + '...')
 PYEOF
-    docker cp /tmp/_reset_admin.py "${CONTAINER}:/tmp/_reset_admin.py" >/dev/null
-    docker exec -e NEW="$NEW" -e UNAME="$USERNAME" "$CONTAINER" python /tmp/_reset_admin.py
-    docker exec "$CONTAINER" rm -f /tmp/_reset_admin.py >/dev/null
+    # 关键：cp 到 /app（容器 WORKDIR）让 python 能 import app 包
+    docker cp /tmp/_reset_admin.py "${CONTAINER}:/app/_reset_admin.py" >/dev/null
+    docker exec -e NEW="$NEW" -e UNAME="$USERNAME" --workdir /app "$CONTAINER" python /app/_reset_admin.py
+    docker exec "$CONTAINER" rm -f /app/_reset_admin.py >/dev/null
     rm -f /tmp/_reset_admin.py
 
     echo
