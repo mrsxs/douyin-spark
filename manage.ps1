@@ -1,4 +1,4 @@
-# 续火花 SaaS Windows 一键运维脚本
+﻿# 续火花 SaaS Windows 一键运维脚本
 #
 # 用法：
 #   1. 装 Docker Desktop for Windows: https://www.docker.com/products/docker-desktop
@@ -165,8 +165,13 @@ function Do-Install {
     )
     if ($CAPTCHA_KEY) { $envContent += "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY" }
     $envContent += "ADMIN_USERNAME=admin"
-    if ($ADMIN_HASH) { $envContent += "ADMIN_PASSWORD_HASH='$ADMIN_HASH'" }
-    $envContent | Out-File -FilePath ".env" -Encoding UTF8
+    if ($ADMIN_HASH) {
+        # ⚠️ docker compose 把 $2b$12$xxx 当变量引用 → 必须 $ → $$ 转义
+        $escapedHash = $ADMIN_HASH -replace '\$', '$$'
+        $envContent += "ADMIN_PASSWORD_HASH=$escapedHash"
+    }
+    # 用 .NET WriteAllLines 避免 PowerShell 5.1 Out-File 写 UTF-16 BOM
+    [System.IO.File]::WriteAllLines("$INSTALL_DIR\.env", $envContent, [System.Text.UTF8Encoding]::new($false))
     Info ".env 已生成"
 
     # 启动

@@ -137,7 +137,11 @@ do_install() {
         echo "LICENSE_KEY=$LICENSE_KEY"
         [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
         echo "ADMIN_USERNAME=admin"
-        [ -n "$ADMIN_HASH" ] && echo "ADMIN_PASSWORD_HASH='$ADMIN_HASH'"
+        # ⚠️ docker compose 把 $2b$12$xxx 当变量引用 → 必须 $ → $$ 转义
+        if [ -n "$ADMIN_HASH" ]; then
+            ESCAPED_HASH="$(printf '%s' "$ADMIN_HASH" | sed 's/\$/$$/g')"
+            echo "ADMIN_PASSWORD_HASH=$ESCAPED_HASH"
+        fi
     } > .env
     chmod 600 .env
     info ".env 已生成"

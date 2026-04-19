@@ -159,7 +159,7 @@ echo "写入 .env..."
     [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
     echo "ADMIN_USERNAME=admin"
     if [ -n "$ADMIN_HASH" ]; then
-        echo "ADMIN_PASSWORD_HASH='$ADMIN_HASH'"
+        echo "ADMIN_PASSWORD_HASH=$(printf '%s' "$ADMIN_HASH" | sed 's/\$/$$/g')"
     fi
 } > .env
 chmod 600 .env
