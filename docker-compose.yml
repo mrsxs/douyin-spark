@@ -5,7 +5,6 @@ services:
     image: mrsxs/douyin-spark:latest
     container_name: douyin-spark
     # 固定容器 MAC：保证机器码（基于 MAC 派生）跨重建稳定
-    # LICENSE_STRICT=1 模式必备，否则 down/up 后机器码变化会让绑机器 license 失效
     mac_address: "02:42:ac:de:ad:01"
     restart: unless-stopped
     ports:
@@ -43,16 +42,16 @@ services:
       # SMTP_PASSWORD: ""
       # SMTP_FROM: ""
       # SMTP_TLS: "true"
+
+    # ⭐ 数据持久化用 bind mount（直接挂宿主机目录，客户能看到 / 手动备份容易）
+    # 默认 ./data（compose 文件所在目录）；.env 里 DATA_VOLUME_PATH=X 可自定义
+    # 例如：DATA_VOLUME_PATH=D:/MyData/spark 或 DATA_VOLUME_PATH=/mnt/external/spark
+    # 删除容器都不会删此目录；备份此目录 = 备份所有 cookies/DB/日志/密钥
     volumes:
-      # 持久化：cookies / 模板 / SQLite DB / 日志 / 加密密钥
-      - spark-data:/data
+      - ${DATA_VOLUME_PATH:-./data}:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
-
-volumes:
-  spark-data:
-    driver: local

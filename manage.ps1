@@ -107,10 +107,30 @@ function Do-Install {
     }
 
     # 配置向导
-    Write-Host "`n━━━ 配置向导（3 步）━━━" -ForegroundColor Cyan
+    Write-Host "`n━━━ 配置向导（4 步）━━━" -ForegroundColor Cyan
 
-    # [1/3] License Key
-    Write-Host "`n[1/3] License Key" -ForegroundColor White
+    # [1/4] 数据存储路径
+    Write-Host "`n[1/4] 数据存储路径（cookies / DB / 日志 / 加密密钥全存这里）" -ForegroundColor White
+    Write-Host "  默认: $INSTALL_DIR\data" -ForegroundColor Gray
+    Write-Host "  也可填绝对路径如 D:\MyData\spark" -ForegroundColor Gray
+    $DATA_PATH = (Read-Host "DATA_PATH (回车用默认)").Trim()
+    if (-not $DATA_PATH) { $DATA_PATH = ".\data" }
+    # 算真实路径
+    if ([System.IO.Path]::IsPathRooted($DATA_PATH)) {
+        $REAL_DATA_PATH = $DATA_PATH
+    } else {
+        $clean = $DATA_PATH -replace '^\.\\|^\./', ''
+        $REAL_DATA_PATH = Join-Path $INSTALL_DIR $clean
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $REAL_DATA_PATH | Out-Null
+    } catch {
+        Die "无法创建 $REAL_DATA_PATH（权限？）"
+    }
+    Info "数据目录：$REAL_DATA_PATH（删除容器不丢）"
+
+    # [2/4] License Key
+    Write-Host "`n[2/4] License Key" -ForegroundColor White
     while ($true) {
         $LICENSE_KEY = (Read-Host "LICENSE_KEY (粘贴卖家给的长字符串)").Trim()
         if (-not $LICENSE_KEY) { Warn "不能为空"; continue }
@@ -123,13 +143,13 @@ function Do-Install {
     }
     Info "License 已接收（$($LICENSE_KEY.Length) 字符）"
 
-    # [2/3] 验证码 Key
-    Write-Host "`n[2/3] 验证码 Key（DDDocr 滑块服务，可回车跳过）" -ForegroundColor White
+    # [3/4] 验证码 Key
+    Write-Host "`n[3/4] 验证码 Key（DDDocr 滑块服务，可回车跳过）" -ForegroundColor White
     $CAPTCHA_KEY = (Read-Host "DOUYIN_CAPTCHA_KEY").Trim()
     if ($CAPTCHA_KEY) { Info "验证码 Key 已接收" } else { Warn "跳过" }
 
-    # [3/3] 管理员密码
-    Write-Host "`n[3/3] 管理员密码（自定义或回车随机）" -ForegroundColor White
+    # [4/4] 管理员密码
+    Write-Host "`n[4/4] 管理员密码（自定义或回车随机）" -ForegroundColor White
     $ADMIN_PASS = Read-Password "ADMIN_PASSWORD"
     $useCustom = $false
     if ($ADMIN_PASS) {
@@ -161,6 +181,7 @@ function Do-Install {
     # 写 .env
     $envContent = @(
         "# 由 manage.ps1 生成 - $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')"
+        "DATA_VOLUME_PATH=$DATA_PATH"
         "LICENSE_KEY=$LICENSE_KEY"
     )
     if ($CAPTCHA_KEY) { $envContent += "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY" }
@@ -320,17 +341,21 @@ function Do-Status {
 function Do-Uninstall {
     Title "[5] 卸载"
     Set-Location $INSTALL_DIR
-    Warn "此操作将停止并删除容器（数据 volume 默认保留）"
-    $confirm = Read-Host "确定？[y/N]"
+    Warn "此操作将停止并删除容器"
+    Write-Host "  数据目录 .\data (cookies/DB/日志) 不会自动删除，可手动清理。" -ForegroundColor Yellow
+    $confirm = Read-Host "确定删除容器？[y/N]"
     if ($confirm -notmatch "^[Yy]$") { Write-Host "已取消"; return }
 
     docker compose down
     Info "容器已停止删除"
 
-    $delData = Read-Host "也删除数据 volume（cookies/DB/日志全删）？[y/N]"
+    Write-Host ""
+    $delData = Read-Host "也删除 .\data 目录（cookies/DB/日志全删，不可恢复）？[y/N]"
     if ($delData -match "^[Yy]$") {
-        docker volume rm $(docker volume ls -q --filter "name=spark-data") 2>$null
-        Info "数据 volume 已删除"
+        Remove-Item -Recurse -Force ".\data"
+        Info "数据目录已删除"
+    } else {
+        Info "数据目录保留在：$INSTALL_DIR\data"
     }
 }
 

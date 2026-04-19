@@ -73,12 +73,30 @@ do_install() {
         fi
     fi
 
-    # 向导：3 个输入
+    # 向导：4 步
     echo
-    echo -e "${CYAN}━━━ 配置向导（3 步）━━━${NC}"
+    echo -e "${CYAN}━━━ 配置向导（4 步）━━━${NC}"
+
+    # [1/4] 数据存储路径
+    echo
+    echo -e "${BOLD}[1/4] 数据存储路径${NC}（cookies / DB / 日志 / 加密密钥全存这里）"
+    echo "  默认: $INSTALL_DIR/data（相对当前目录）"
+    echo "  也可填绝对路径如 /mnt/data/spark 或 /external/backup/spark"
+    read -r -p "DATA_PATH (回车用默认): " DATA_PATH
+    DATA_PATH="$(echo "$DATA_PATH" | xargs)"
+    [ -z "$DATA_PATH" ] && DATA_PATH="./data"
+    # 算真实路径
+    if [[ "$DATA_PATH" = /* ]]; then
+        REAL_DATA_PATH="$DATA_PATH"
+    else
+        REAL_DATA_PATH="$INSTALL_DIR/${DATA_PATH#./}"
+    fi
+    mkdir -p "$REAL_DATA_PATH" || die "无法创建 $REAL_DATA_PATH（权限？）"
+    chmod 700 "$REAL_DATA_PATH" 2>/dev/null || true
+    info "数据目录：$REAL_DATA_PATH（删除容器不丢）"
 
     echo
-    echo -e "${BOLD}[1/3] License Key${NC}"
+    echo -e "${BOLD}[2/4] License Key${NC}"
     while true; do
         read -r -p "LICENSE_KEY (粘贴卖家给的长字符串): " LICENSE_KEY
         LICENSE_KEY="$(echo "$LICENSE_KEY" | xargs)"
@@ -92,13 +110,13 @@ do_install() {
     info "License 已接收（${#LICENSE_KEY} 字符）"
 
     echo
-    echo -e "${BOLD}[2/3] 验证码 Key${NC}（DDDocr 滑块服务，可回车跳过）"
+    echo -e "${BOLD}[3/4] 验证码 Key${NC}（DDDocr 滑块服务，可回车跳过）"
     read -r -p "DOUYIN_CAPTCHA_KEY: " CAPTCHA_KEY
     CAPTCHA_KEY="$(echo "$CAPTCHA_KEY" | xargs)"
     [ -n "$CAPTCHA_KEY" ] && info "验证码 Key 已接收" || warn "跳过（短信登录滑块无法自动识别）"
 
     echo
-    echo -e "${BOLD}[3/3] 管理员密码${NC}（自定义或回车让系统随机生成）"
+    echo -e "${BOLD}[4/4] 管理员密码${NC}（自定义或回车让系统随机生成）"
     read -r -s -p "ADMIN_PASSWORD（输入隐藏）: " ADMIN_PASS
     echo
     USE_CUSTOM_PASS=0
@@ -134,6 +152,7 @@ do_install() {
     # 写 .env
     {
         echo "# 由 manage.sh 生成 - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "DATA_VOLUME_PATH=$DATA_PATH"
         echo "LICENSE_KEY=$LICENSE_KEY"
         [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
         echo "ADMIN_USERNAME=admin"
