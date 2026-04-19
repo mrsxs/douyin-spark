@@ -370,9 +370,11 @@ def _ensure_templates_exist(contacts: list[dict]) -> dict:
 # ── 日志（结构化）─────────────────────────────────────────────────────
 
 def _log(line: str, tag: str = "INFO"):
-    """写到 ~/.douyin/<account>/logs/YYYY-MM-DD.log 并同时 print"""
+    """写到 data/users/<uid>/accounts/<aid>/logs/YYYY-MM-DD.log 并同时 print"""
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{ts}] [{_current_account}] {tag} {line}"
+    ctx = get_account_ctx()
+    label = f"u{ctx.user_id}/a{ctx.account_id}" if ctx else "default"
+    entry = f"[{ts}] [{label}] {tag} {line}"
     print(entry)
     try:
         log_dir = os.path.join(_account_dir(), "logs")
