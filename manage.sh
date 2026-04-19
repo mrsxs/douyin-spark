@@ -1,0 +1,334 @@
+#!/bin/bash
+# 续火花 SaaS 服务器端运维主菜单
+#
+# 一键启动：
+#   curl -sL https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/manage.sh -o manage.sh
+#   chmod +x manage.sh
+#   ./manage.sh
+#
+# 功能：
+#   [1] 安装/启动服务（首次部署 + 后续升级）
+#   [2] 重置管理员密码
+#   [3] 续期 License
+#   [4] 查看服务状态 & 日志
+#   [0] 退出
+
+set -e
+
+BOLD='\033[1m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; CYAN='\033[36m'; NC='\033[0m'
+COMPOSE_URL="https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/docker-compose.yml"
+IMAGE="mrsxs/douyin-spark:latest"
+INSTALL_DIR="${INSTALL_DIR:-/opt/douyin-spark}"
+CONTAINER="douyin-spark"
+
+if [ "$(id -u)" -ne 0 ] && [[ "$INSTALL_DIR" == /opt/* ]]; then
+    INSTALL_DIR="$HOME/douyin-spark"
+fi
+mkdir -p "$INSTALL_DIR"
+
+hr()    { printf "${BOLD}━%.0s${NC}" $(seq 1 60); echo; }
+title() { hr; echo -e "${BOLD}  $*${NC}"; hr; }
+info()  { echo -e "${GREEN}✓${NC} $*"; }
+warn()  { echo -e "${YELLOW}⚠${NC}  $*"; }
+err()   { echo -e "${RED}❌${NC} $*" >&2; }
+die()   { err "$*"; exit 1; }
+
+check_deps() {
+    command -v docker >/dev/null || die "未安装 Docker。Ubuntu: apt install docker.io"
+    docker compose version >/dev/null 2>&1 || die "未安装 Docker Compose v2。apt install docker-compose-plugin"
+    command -v curl >/dev/null || die "未安装 curl"
+}
+
+container_running() {
+    docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"
+}
+
+# ────────────────────────────────────────────
+# [1] 安装/启动服务
+# ────────────────────────────────────────────
+do_install() {
+    title "[1] 安装/启动服务"
+    cd "$INSTALL_DIR"
+
+    # 下载 compose 文件（如果没）
+    if [ ! -f docker-compose.yml ]; then
+        echo "下载 docker-compose.yml..."
+        curl -fsSL -o docker-compose.yml "$COMPOSE_URL" || die "compose 下载失败"
+        info "docker-compose.yml 已下载"
+    else
+        info "docker-compose.yml 已存在"
+    fi
+
+    # .env 检查
+    if [ -f .env ] && grep -q '^LICENSE_KEY=.\+' .env; then
+        warn "已有 .env 配置"
+        read -r -p "重新配置？[y/N]: " RECONFIG
+        if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
+            echo
+            echo "拉取最新镜像并重启..."
+            docker compose pull
+            docker compose up -d
+            wait_ready
+            return
+        fi
+    fi
+
+    # 向导：3 个输入
+    echo
+    echo -e "${CYAN}━━━ 配置向导（3 步）━━━${NC}"
+
+    echo
+    echo -e "${BOLD}[1/3] License Key${NC}"
+    while true; do
+        read -r -p "LICENSE_KEY (粘贴卖家给的长字符串): " LICENSE_KEY
+        LICENSE_KEY="$(echo "$LICENSE_KEY" | xargs)"
+        [ -z "$LICENSE_KEY" ] && { warn "不能为空"; continue; }
+        if [[ ! "$LICENSE_KEY" == *.* ]]; then
+            warn "格式异常（无 . 分隔签名）。继续？[y/N]"
+            read -r OK; [[ "$OK" =~ ^[Yy]$ ]] || continue
+        fi
+        break
+    done
+    info "License 已接收（${#LICENSE_KEY} 字符）"
+
+    echo
+    echo -e "${BOLD}[2/3] 验证码 Key${NC}（DDDocr 滑块服务，可回车跳过）"
+    read -r -p "DOUYIN_CAPTCHA_KEY: " CAPTCHA_KEY
+    CAPTCHA_KEY="$(echo "$CAPTCHA_KEY" | xargs)"
+    [ -n "$CAPTCHA_KEY" ] && info "验证码 Key 已接收" || warn "跳过（短信登录滑块无法自动识别）"
+
+    echo
+    echo -e "${BOLD}[3/3] 管理员密码${NC}（自定义或回车让系统随机生成）"
+    read -r -s -p "ADMIN_PASSWORD（输入隐藏）: " ADMIN_PASS
+    echo
+    USE_CUSTOM_PASS=0
+    if [ -n "$ADMIN_PASS" ]; then
+        read -r -s -p "再次确认: " ADMIN_PASS2
+        echo
+        [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] || die "两次输入不一致"
+        [ ${#ADMIN_PASS} -lt 6 ] && die "密码至少 6 位"
+        USE_CUSTOM_PASS=1
+        info "密码已接收（${#ADMIN_PASS} 位）"
+    else
+        info "跳过，将由容器自动生成强随机密码"
+    fi
+
+    # 拉镜像
+    echo
+    echo "拉取镜像 ${IMAGE}..."
+    docker pull "$IMAGE"
+
+    # 自定义密码 → bcrypt 哈希
+    ADMIN_HASH=""
+    if [ "$USE_CUSTOM_PASS" = "1" ]; then
+        echo
+        echo "生成 bcrypt 哈希..."
+        ADMIN_HASH="$(
+            ADMIN_PASS="$ADMIN_PASS" docker run --rm -e ADMIN_PASS "$IMAGE" \
+                python -c "import os,bcrypt; print(bcrypt.hashpw(os.environ['ADMIN_PASS'].encode()[:72], bcrypt.gensalt(12)).decode())"
+        )"
+        [ -z "$ADMIN_HASH" ] && die "哈希生成失败"
+        info "哈希已生成"
+    fi
+
+    # 写 .env
+    {
+        echo "# 由 manage.sh 生成 - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "LICENSE_KEY=$LICENSE_KEY"
+        [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
+        echo "ADMIN_USERNAME=admin"
+        [ -n "$ADMIN_HASH" ] && echo "ADMIN_PASSWORD_HASH='$ADMIN_HASH'"
+    } > .env
+    chmod 600 .env
+    info ".env 已生成"
+
+    # 启动
+    docker compose up -d
+    wait_ready
+
+    echo
+    IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo -e "  🌐 Web 地址: ${BOLD}http://${IP:-服务器IP}:8765${NC}"
+    echo -e "  👤 用户名  : ${BOLD}admin${NC}"
+    if [ "$USE_CUSTOM_PASS" = "1" ]; then
+        echo -e "  🔐 密码    : ${BOLD}（你刚输入的）${NC}"
+    else
+        echo
+        echo "  📋 系统自动生成的 admin 密码："
+        sleep 2
+        docker compose logs 2>&1 | grep -A 8 "管理员账户" | tail -10 || echo "  （首次启动还没打印，稍等再 docker compose logs 查）"
+    fi
+}
+
+# ────────────────────────────────────────────
+# [2] 重置管理员密码
+# ────────────────────────────────────────────
+do_reset_password() {
+    title "[2] 重置管理员密码"
+    cd "$INSTALL_DIR"
+    container_running || die "容器 ${CONTAINER} 未运行，请先选 [1] 安装/启动"
+
+    read -r -p "用户名（默认 admin）: " USERNAME
+    USERNAME="${USERNAME:-admin}"
+
+    while true; do
+        read -r -s -p "新密码（隐藏）: " NEW
+        echo
+        [ -z "$NEW" ] && { warn "不能为空"; continue; }
+        [ ${#NEW} -lt 6 ] && { warn "至少 6 位"; continue; }
+        read -r -s -p "再次确认: " NEW2
+        echo
+        [ "$NEW" = "$NEW2" ] && break
+        warn "两次不一致，重新输入"
+    done
+
+    # 生成内嵌 python 脚本，cp 进容器执行（兼容老镜像，不依赖 cli）
+    cat > /tmp/_reset_admin.py <<'PYEOF'
+import os, bcrypt
+from datetime import datetime
+from app.db import SessionLocal, init_db
+from app.models import User
+init_db()
+username = os.environ.get('UNAME', 'admin')
+pwd = os.environ['NEW']
+h = bcrypt.hashpw(pwd.encode()[:72], bcrypt.gensalt(12)).decode()
+with SessionLocal() as db:
+    u = db.query(User).filter(User.username == username).first()
+    if not u:
+        u = User(username=username, password_hash=h, is_admin=True, is_active=True,
+                 expires_at=datetime(2099, 12, 31), max_accounts=100)
+        db.add(u)
+        msg = f'✓ 已创建管理员 {username}'
+    else:
+        u.password_hash = h; u.is_active = True; u.is_admin = True
+        msg = f'✓ 已重置 {username} 密码'
+    db.commit()
+    print(msg)
+    print('hash 前缀:', h[:30] + '...')
+PYEOF
+    docker cp /tmp/_reset_admin.py "${CONTAINER}:/tmp/_reset_admin.py" >/dev/null
+    docker exec -e NEW="$NEW" -e UNAME="$USERNAME" "$CONTAINER" python /tmp/_reset_admin.py
+    docker exec "$CONTAINER" rm -f /tmp/_reset_admin.py >/dev/null
+    rm -f /tmp/_reset_admin.py
+
+    echo
+    info "密码已生效，立即可登录："
+    IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "  🌐 http://${IP:-服务器IP}:8765/login"
+    echo "  👤 $USERNAME"
+}
+
+# ────────────────────────────────────────────
+# [3] 续期 License
+# ────────────────────────────────────────────
+do_renew() {
+    title "[3] 续期 License"
+    cd "$INSTALL_DIR"
+    [ -f .env ] || die ".env 不存在，请先选 [1] 安装"
+
+    # 显示当前 license
+    echo "当前 License："
+    docker compose logs --tail 200 2>&1 | grep -A 5 "✓ License 已验证" | tail -6 || echo "（无法读取）"
+    echo
+
+    while true; do
+        read -r -p "粘贴卖家新签的 License Key: " NEW_LICENSE
+        NEW_LICENSE="$(echo "$NEW_LICENSE" | xargs)"
+        [ -z "$NEW_LICENSE" ] && { warn "不能为空"; continue; }
+        if [[ ! "$NEW_LICENSE" == *.* ]]; then
+            warn "格式异常。继续？[y/N]"
+            read -r OK; [[ "$OK" =~ ^[Yy]$ ]] || continue
+        fi
+        break
+    done
+
+    BACKUP=".env.bak.$(date +%Y%m%d_%H%M%S)"
+    cp .env "$BACKUP"
+    info "旧 .env 备份到 $BACKUP"
+
+    if grep -q '^LICENSE_KEY=' .env; then
+        sed -i.tmp "s#^LICENSE_KEY=.*#LICENSE_KEY=$NEW_LICENSE#" .env && rm -f .env.tmp
+    else
+        echo "LICENSE_KEY=$NEW_LICENSE" >> .env
+    fi
+    info ".env 已更新"
+
+    echo "重启容器..."
+    docker compose restart
+    sleep 3
+
+    echo
+    docker compose logs --tail 30 2>&1 | grep -A 5 "✓ License 已验证" | tail -6 || {
+        warn "未找到验证成功标志，查完整日志："
+        docker compose logs --tail 20
+        echo
+        warn "可恢复旧 license: cp $BACKUP .env && docker compose restart"
+        return 1
+    }
+    info "续期成功"
+}
+
+# ────────────────────────────────────────────
+# [4] 状态 & 日志
+# ────────────────────────────────────────────
+do_status() {
+    title "[4] 状态 & 日志"
+    cd "$INSTALL_DIR"
+    echo
+    echo "── 容器状态 ──────────"
+    docker compose ps 2>&1 || echo "未启动"
+    echo
+    echo "── 最近 30 行日志 ────"
+    docker compose logs --tail 30 2>&1 || echo "无日志"
+}
+
+# ────────────────────────────────────────────
+wait_ready() {
+    echo "等待容器就绪..."
+    for i in $(seq 1 60); do
+        if curl -sf http://127.0.0.1:8765/healthz >/dev/null 2>&1; then
+            info "服务已就绪"
+            return 0
+        fi
+        sleep 1
+    done
+    warn "60s 内未就绪，请用 [4] 查日志"
+    return 1
+}
+
+# ────────────────────────────────────────────
+# 主菜单
+# ────────────────────────────────────────────
+check_deps
+
+while true; do
+    clear
+    title "续火花 SaaS 服务器运维 ($(hostname))"
+    echo
+    if container_running; then
+        echo -e "  状态: ${GREEN}● 运行中${NC}    数据目录: $INSTALL_DIR"
+    else
+        echo -e "  状态: ${RED}● 未运行${NC}    数据目录: $INSTALL_DIR"
+    fi
+    echo
+    echo "  [1] 安装 / 启动 / 升级服务"
+    echo "  [2] 重置管理员密码"
+    echo "  [3] 续期 License"
+    echo "  [4] 查看状态 & 日志"
+    echo
+    echo "  [0] 退出"
+    echo
+    read -r -p "选择 [0-4]: " CHOICE
+
+    case "$CHOICE" in
+        1) do_install ;;
+        2) do_reset_password ;;
+        3) do_renew ;;
+        4) do_status ;;
+        0) echo "再见 👋"; exit 0 ;;
+        *) warn "无效选择" ;;
+    esac
+
+    echo
+    read -r -p "按回车返回主菜单..." _
+done
