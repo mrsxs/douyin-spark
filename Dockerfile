@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir cython setuptools wheel \
 COPY app/            app/
 COPY lib/            lib/
 COPY templates/      templates/
-COPY setup_ext.py run.py douyin_im.py fetch_security.py ./
+COPY setup_ext.py run.py douyin_im.py ./
 
 # 编译成 .so，然后删除所有被编译的 .py 源文件（除保留列表）
 RUN python setup_ext.py build_ext --inplace 2>&1 | tail -20 && \
@@ -43,7 +43,7 @@ for p in pathlib.Path(".").rglob("*.py"):
         continue
     if rel.startswith("build/"):
         continue
-    if rel == "setup_ext.py" or rel == "fetch_security.py":
+    if rel == "setup_ext.py":
         # 构建脚本不用留在运行镜像
         p.unlink(); print("deleted:", rel); continue
     # 检查是否有对应的 .so
