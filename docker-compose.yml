@@ -4,6 +4,9 @@ services:
     # 如果想用 GHCR 私有：先 `docker login ghcr.io`，然后改成 ghcr.io/mrsxs/douyin-spark:latest
     image: mrsxs/douyin-spark:latest
     container_name: douyin-spark
+    # 固定容器 MAC：保证机器码（基于 MAC 派生）跨重建稳定
+    # LICENSE_STRICT=1 模式必备，否则 down/up 后机器码变化会让绑机器 license 失效
+    mac_address: "02:42:ac:de:ad:01"
     restart: unless-stopped
     ports:
       - "8765:8765"
