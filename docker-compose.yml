@@ -10,6 +10,9 @@ services:
     ports:
       - "8765:8765"
     environment:
+      # ─── 时区（⭐ 关键：不设的话容器走 UTC，定时时间会差 8 小时）──
+      TZ: "${TZ:-Asia/Shanghai}"
+
       # ─── 必填 ──────────────────────────────────
       LICENSE_KEY: "${LICENSE_KEY:?LICENSE_KEY is required，联系卖家（闲鱼 HU287）获取}"
 
