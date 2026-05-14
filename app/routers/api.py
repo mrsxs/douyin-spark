@@ -120,10 +120,16 @@ def _format_send_detail(info: dict) -> str:
     if not info:
         return "无响应信息"
     if info.get("ok"):
+        # extras 非空说明抖音在 OK 响应里夹带了风控/限流码，是 shadowban 的强信号
+        extras = info.get("extras") or {}
+        if extras:
+            return f"服务端返回 OK（extras={extras}）"
         return "服务端返回 OK"
     stage = info.get("stage")
     if stage == "no_private_key":
         return info.get("error") or "缺少私钥，需要重新扫码登录"
+    if stage == "no_ticket":
+        return info.get("error") or "联系人 ticket 缺失（init_req 漏抓），需重新登录"
     if stage == "exception":
         return f"请求异常: {info.get('error')}"
     msg = info.get("msg")

@@ -101,7 +101,7 @@
       <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
         {% for c in contacts %}
           {% set uid = c['uid'] %}
-          {% set tpl = templates.get(uid, {"enabled": True, "messages": []}) %}
+          {% set tpl = templates.get(uid, {"enabled": False, "messages": []}) %}
         <tr data-uid="{{ uid }}">
           <td class="px-3 py-3 text-center">
             <input type="checkbox" class="contact-select w-4 h-4 accent-brand-600 cursor-pointer"

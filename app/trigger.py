@@ -86,6 +86,14 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
     if resp.status_code != 200 or len(resp.content) < 1024:
         raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
     contacts = dy.parse_fire_streaks(resp.content)
+    # 诊断：统计 init 响应里所有私聊 conv_id 个数，对比解析出的火花条目数
+    try:
+        import re as _re
+        all_convs = set(m.group() for m in _re.finditer(rb'0:[12]:\d+:\d+', resp.content))
+        dy._log(f"[ensure_active] init resp={len(resp.content)}B, "
+                f"conv_ids={len(all_convs)} 个, 解析出火花联系人={len(contacts)} 个", "INFO")
+    except Exception:
+        pass
     # 合并缓存昵称
     try:
         cache = json.load(open(str(dy.CONTACTS_FILE)))

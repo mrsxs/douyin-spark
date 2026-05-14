@@ -28,6 +28,10 @@ RETRY_BACKOFF_MINUTES = 5
 
 _STOP = threading.Event()
 
+# 进程启动时间（本地时区）。用于「重启不自动补跑过时任务」：
+# 启动前已经过了 time_hhmm 的当天任务，由用户手动触发，scheduler 不补跑。
+_STARTUP_AT: datetime | None = None
+
 
 def _run_one(user_id: int, account_id: int):
     try:
@@ -85,7 +89,18 @@ def _loop():
                     # 用户改 time_hhmm 时 api.py 会清空 last_ran_date，允许同日在新时间再触发
                     if sch.last_ran_date == today:
                         continue
-                    # ② 还有活跃的 running（未超过 stale 阈值）→ 跳过，等它结束
+                    # ②【重启不自动补跑】启动前已经过了今天的 time_hhmm → 跳过，由用户手动触发
+                    # 避免凌晨重启后立刻补跑「错过的定时」打扰用户
+                    if _STARTUP_AT is not None:
+                        try:
+                            _h, _m = sch.time_hhmm.split(":")
+                            sched_dt_today = local_midnight.replace(
+                                hour=int(_h), minute=int(_m))
+                            if sched_dt_today < _STARTUP_AT:
+                                continue
+                        except Exception:
+                            pass
+                    # ③ 还有活跃的 running（未超过 stale 阈值）→ 跳过，等它结束
                     active_running = (db.query(JobRun.id)
                                         .filter(JobRun.douyin_account_id == acc.id,
                                                 JobRun.kind == "auto",
@@ -94,7 +109,7 @@ def _loop():
                                         .first())
                     if active_running:
                         continue
-                    # ③ 今日已失败次数超过上限 → 跳过，避免死循环
+                    # ④ 今日已失败次数超过上限 → 跳过，避免死循环
                     error_today = (db.query(JobRun.id)
                                      .filter(JobRun.douyin_account_id == acc.id,
                                              JobRun.kind == "auto",
@@ -103,7 +118,7 @@ def _loop():
                                      .count())
                     if error_today >= MAX_DAILY_RETRIES:
                         continue
-                    # ④ 失败后退避：最近一次 error 在 RETRY_BACKOFF_MINUTES 分钟内则暂不重试
+                    # ⑤ 失败后退避：最近一次 error 在 RETRY_BACKOFF_MINUTES 分钟内则暂不重试
                     if error_today > 0:
                         backoff_cutoff_utc = datetime.utcnow() - timedelta(minutes=RETRY_BACKOFF_MINUTES)
                         recent_error = (db.query(JobRun.started_at)
@@ -114,7 +129,7 @@ def _loop():
                                           .first())
                         if recent_error:
                             continue
-                    # ⑤ last_ran_date 不在这里写入（由 trigger.auto_run 成功时才写）
+                    # ⑥ last_ran_date 不在这里写入（由 trigger.auto_run 成功时才写）
                     #   —— 避免失败后仍被标记为"今日已跑"导致次日不重试
                     retry_hint = f" retry={error_today}" if error_today else ""
                     print(f"[scheduler] trigger user={user.id} account={acc.id} "
@@ -237,12 +252,14 @@ def _cleanup_stale_runs():
 
 def start():
     """在 FastAPI startup 时调用，拉起后台线程"""
-    global _thread, _health_thread
+    global _thread, _health_thread, _STARTUP_AT
+    _STARTUP_AT = datetime.now()
     _cleanup_stale_runs()
     if not (_thread and _thread.is_alive()):
         _thread = threading.Thread(target=_loop, daemon=True, name="scheduler")
         _thread.start()
-        print("[scheduler] 启动（每 30s 扫 schedules 表）")
+        print(f"[scheduler] 启动（每 30s 扫 schedules 表）startup={_STARTUP_AT:%Y-%m-%d %H:%M:%S} "
+              f"启动前过时任务不自动补跑")
     if not (_health_thread and _health_thread.is_alive()):
         _health_thread = threading.Thread(target=_health_loop, daemon=True, name="health")
         _health_thread.start()

@@ -331,19 +331,25 @@ def _save_templates(tpl: dict):
 
 
 def _pick_message(uid: str, name: str, templates: dict) -> str | None:
-    """按优先级选择消息：联系人专属 > default 默认 > None(跳过)"""
+    """按优先级选择消息：
+    - 联系人无 entry → 跳过（新联系人默认不自动续，必须用户显式启用）
+    - entry.enabled=False → 跳过
+    - 有 messages → 随机一条
+    - 已启用但 messages 空 → 兜底到 default 模板
+    """
     entry = templates.get(uid) or templates.get(name)
-    if entry:
-        if entry.get("enabled") is False:
-            return None
-        msgs = entry.get("messages") or []
-        if msgs:
-            return random.choice(msgs)
+    if not entry:
+        return None
+    if entry.get("enabled") is False:
+        return None
+    msgs = entry.get("messages") or []
+    if msgs:
+        return random.choice(msgs)
     fallback = templates.get("default")
     if fallback and fallback.get("enabled", True):
-        msgs = fallback.get("messages") or []
-        if msgs:
-            return random.choice(msgs)
+        fb_msgs = fallback.get("messages") or []
+        if fb_msgs:
+            return random.choice(fb_msgs)
     return None
 
 
@@ -1283,16 +1289,38 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             all_uid_ctr[parts[3]] += 1
     my_uid = all_uid_ctr.most_common(1)[0][0] if all_uid_ctr else ""
 
-    # 找火花天数 — 兼容 consecutive_chat / rekindled 等变种，窗口加大
-    streak_entries: list[tuple[int, int]] = []
+    # 找火花天数：
+    # - consecutive_chat = 当前连续聊天（火花未断）
+    # - rekindled_chat   = 历史重燃记录（断了也会保留）→ 默认不算
+    # 用单独正则，记录每个 entry 的 marker 类型方便诊断
+    streak_entries: list[tuple[int, int, str]] = []  # (pos, days, marker)
     for m in re.finditer(
-        rb'a:(?:consecutive_chat|rekindled(?:_chat)?)(?:\x00)*\x12.{1,4}?(\d{1,4}):',
+        rb'a:(consecutive_chat|rekindled(?:_chat)?)(?:\x00)*\x12.{1,4}?(\d{1,4}):',
         resp_bytes
     ):
         try:
-            days = int(m.group(1))
+            marker = m.group(1).decode()
+            days = int(m.group(2))
             if days > 0:
-                streak_entries.append((m.start(), days))
+                streak_entries.append((m.start(), days, marker))
+        except Exception:
+            pass
+
+    # 找每个会话的 consecutive_chat_data JSON（含 expire_time / can_recover_days / flame_infos）
+    # 形如：a:consecutive_chat_data\x12<varint-len><json>
+    # 用 expire_time 判断火花是否还在燃烧；过期的不该被识别为「续火花」目标
+    chat_data_entries: list[tuple[int, int]] = []  # (pos, expire_time)
+    _now_ts = int(time.time())
+    for m in re.finditer(rb'a:consecutive_chat_data\x12', resp_bytes):
+        # 读 varint length
+        p = m.end()
+        try:
+            length, p2 = _read_vi(resp_bytes, p)
+            blob = resp_bytes[p2:p2+length]
+            obj = json.loads(blob.decode('utf-8', 'replace'))
+            exp = int(obj.get('expire_time') or 0)
+            if exp:
+                chat_data_entries.append((m.start(), exp))
         except Exception:
             pass
 
@@ -1325,8 +1353,29 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             continue
 
         # 搜索窗口扩大到 60KB，覆盖更大跨度的数据块
-        days = next((d for p, d in streak_entries if conv_pos < p < conv_pos + 60000), None)
-        if not days:
+        # 取 conv_pos 之后窗口内的 consecutive_chat 标记 + expire_time
+        match = next(
+            ((d, mk) for p, d, mk in streak_entries
+             if conv_pos < p < conv_pos + 60000 and mk == "consecutive_chat"),
+            None,
+        )
+        if not match:
+            _rekindled = next(((d, mk) for p, d, mk in streak_entries
+                               if conv_pos < p < conv_pos + 60000), None)
+            if _rekindled:
+                _log(f"  [parse] 跳过 uid={uid}: 仅有 {_rekindled[1]}={_rekindled[0]}天（火花已断）", "PARSE")
+            continue
+        days, marker = match
+
+        # 校验 expire_time：consecutive_chat_data.expire_time 是火花过期 unix 秒
+        # < 当前时间 → 火花已断（抖音 web 显示「续火花」按钮），脚本不能直接续 → 跳过
+        exp_ts = next((e for p, e in chat_data_entries
+                       if conv_pos < p < conv_pos + 60000), None)
+        if exp_ts and exp_ts < _now_ts:
+            from datetime import datetime as _dt
+            _log(f"  [parse] 跳过 uid={uid}: expire_time={exp_ts}"
+                 f" ({_dt.fromtimestamp(exp_ts):%Y-%m-%d %H:%M}) 已过期，火花已断需主动续",
+                 "PARSE")
             continue
 
         sec_uid  = _find_sec_uid_for_uid(resp_bytes, uid, my_sec_uids)
@@ -1621,6 +1670,12 @@ def _update_send_info(**kwargs) -> None:
 def send_text(session: requests.Session, conv_id: str, text: str,
               contact: dict, constants: dict) -> bool:
     _set_send_info({"stage": "start", "conv_id": conv_id})
+    # 缺少 conv_id / ticket（init_req 没抓全）→ 直接返回，避免无效请求 + 误判风控
+    if not conv_id or not contact.get("ticket"):
+        _log("  ⚠ 联系人缺 conv_id 或 ticket（init_req 漏抓），请重新登录刷新", "SKIP")
+        _set_send_info({"stage": "no_ticket",
+                        "error": "联系人 ticket 缺失（init_req 未抓到），需重新登录"})
+        return False
     security = _load_security()
     if not security.get("private_key"):
         print("  ⚠ 缺少私钥 (~/.douyin_security.json)，必须先通过扫码登录抓取")
