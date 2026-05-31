@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     smtp_tls:      bool = True  # STARTTLS (587)；465 时需自行改成 SSL
 
     # ── 保留现有配置（douyin_im 签名 / ddocr）──
-    douyin_captcha_url: str = "http://ocr.example.com"
+    # 自建 ddddocr 滑块识别服务（仅短信登录用）。留空则短信登录的滑块验证不可用。
+    # 在 .env 配 DOUYIN_CAPTCHA_URL，不要把真实地址写进代码默认值。
+    douyin_captcha_url: str = ""
     douyin_captcha_endpoint: str = "/slide_match"
     douyin_captcha_key: str = ""
     douyin_node_bin: str = ""

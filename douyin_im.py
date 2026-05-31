@@ -479,18 +479,21 @@ def _solve_slider(bg_url: str, slider_url: str) -> tuple[int, list[dict]]:
     r = requests.post(
         url,
         headers={"X-API-Key": cfg.get("captcha_solver_api_key", "")},
-        data={"target": slider_b64, "background": bg_b64, "simple_target": "false"},
+        json={"target": slider_b64, "background": bg_b64, "simple_target": False},
         timeout=20,
     )
     body = r.json()
     code = body.get("code")
     if code not in (0, 200):
-        raise RuntimeError(f"DDDocr 返回错误: code={code} msg={body.get('message')}")
-    data = body.get("data") or {}
-    # 兼容两种返回: {"target": [x1,y1,x2,y2]} 或 {"x": 123}
-    if isinstance(data.get("target"), list) and len(data["target"]) >= 1:
+        raise RuntimeError(f"DDDocr 返回错误: code={code} msg={body.get('msg') or body.get('message')}")
+    # 兼容 ocr.mrsong.top 的 result 字段 与 旧服务的 data 字段
+    data = body.get("result")
+    if data is None:
+        data = body.get("data") or {}
+    # 兼容多种返回: {"target":[x1,y1,x2,y2]} / {"x":123} / {"target_y":..,"x":..}
+    if isinstance(data, dict) and isinstance(data.get("target"), list) and len(data["target"]) >= 1:
         x = int(data["target"][0])
-    elif "x" in data:
+    elif isinstance(data, dict) and "x" in data:
         x = int(data["x"])
     else:
         raise RuntimeError(f"DDDocr 响应格式未识别: {body}")
@@ -926,13 +929,154 @@ def _extract_one_contact(u: dict, out: dict):
     out[uid] = entry
 
 
-def qr_login(headless: bool = False, qr_sink=None, on_logged_in=None) -> requests.Session:
+def _handle_mfa_verify(page, verify_sink=None, code_provider=None) -> bool:
+    """扫码确认后抖音可能强制二次验证（身份验证 → 短信验证码，mfa_web SDK）。
+    检测到「身份验证」弹窗 → 点「接收短信验证码」→ 等短信发出 → 取码 → 填入 → 点「验证」。
+
+    verify_sink(masked_phone):  通知外层"需要短信码 + 掩码手机号"（如 130******73）。
+    code_provider() -> str|None: 阻塞拿用户提交的验证码；None=超时/取消。
+    返回 True 表示检测到弹窗并已驱动（成败都算），调用方据此避免重复触发。
+    无回调（CLI 有头）时只打印提示，靠人在窗口里手动完成。
+    """
+    import re as _re
+    try:
+        has_modal = (page.get_by_text("身份验证").count() > 0
+                     or page.get_by_text("发送短信验证").count() > 0
+                     or page.get_by_text("短信已发送至").count() > 0)
+    except Exception:
+        return False
+    if not has_modal:
+        return False
+
+    if verify_sink is None or code_provider is None:
+        print("\n⚠️  检测到二次验证（身份验证），请在浏览器窗口完成短信验证码...")
+        return True
+
+    print("  检测到二次验证，自动驱动短信验证码流程...")
+    try:
+        # 1. 未发码则点「接收短信验证码」让抖音下发短信
+        if page.get_by_text("短信已发送至").count() == 0:
+            page.get_by_text("接收短信验证码", exact=True).first.click(timeout=8000)
+        # 2. 等短信发出，抓掩码手机号（如 130******73）
+        page.wait_for_selector("text=短信已发送至", timeout=15000)
+        masked = ""
+        try:
+            masked = page.get_by_text(_re.compile(r"\d{2,3}\*{2,}\d{2}")).first.inner_text(timeout=3000).strip()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"  [verify] 触发短信验证失败: {e}")
+        return True
+
+    # 3. 通知前端 + 阻塞取码
+    try: verify_sink(masked)
+    except Exception: pass
+    code = None
+    try: code = code_provider()
+    except Exception as e: print(f"  [verify] 取码异常: {e}")
+    if not code:
+        print("  [verify] 未拿到验证码（超时/取消）")
+        return True
+
+    # 4. 填码 + 点「验证」（弹窗内可见的那个输入框/按钮）
+    try:
+        page.locator("input[placeholder='请输入验证码']:visible").last.fill(str(code).strip(), timeout=8000)
+        page.get_by_text("验证", exact=True).last.click(timeout=8000)
+        print("  [verify] 验证码已提交")
+    except Exception as e:
+        print(f"  [verify] 填码/提交失败: {e}")
+    return True
+
+
+def _capture_and_finish(page, context, cookies: dict, captured_nicks: dict,
+                        on_logged_in=None) -> requests.Session:
+    """登录拿到 sessionid 后的统一收尾（扫码/短信共用）：
+    回调外层 → 抓 init_req → 抓 localStorage 私钥/签名 → 落盘 cookies/contacts/security → 返回 session。
+    须在 Playwright with 块内调用（用到 page/context）；不负责关 browser（调用方关）。"""
+    print("✓ 登录成功，正在捕获 IM 会话数据和联系人昵称...")
+    # 立即写 cookies + 回调外层，让前端尽早感知成功
+    try:
+        _secure_write(str(COOKIE_FILE), cookies)
+    except Exception as _e:
+        print(f"  预落 cookies 失败: {_e}")
+    if on_logged_in is not None:
+        try: on_logged_in(cookies)
+        except Exception as _e: print(f"  on_logged_in 回调异常: {_e}")
+
+    # 导航到 douyin.com，同步等 get_message_by_init 请求
+    init_body = None
+    try:
+        with page.expect_request(
+            lambda r: "get_message_by_init" in r.url and r.method == "POST",
+            timeout=30000,
+        ) as init_info:
+            page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
+        init_body = init_info.value.post_data_buffer
+    except Exception as e:
+        print(f"  警告: 抓取 init_req 失败: {e}")
+    # 多等 10 秒让前端拉完 spotlight/relation 等昵称接口
+    try:
+        page.wait_for_timeout(10000)
+    except Exception:
+        pass
+
+    # 抓 localStorage 私钥等
+    security: dict = {}
+    try:
+        crypt = page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"] || ""') or ""
+        if crypt:
+            inner = json.loads(json.loads(crypt)["data"])
+            security["private_key"] = inner.get("ec_privateKey", "")
+    except Exception as e:
+        print(f"  抓私钥失败: {e}")
+    try:
+        wp = page.evaluate('localStorage["security-sdk/s_sdk_sign_data_key/web_protect"] || ""') or ""
+        if wp:
+            inner = json.loads(json.loads(wp)["data"])
+            security["ticket"]      = inner.get("ticket", "")
+            security["ts_sign"]     = inner.get("ts_sign", "")
+            security["client_cert"] = inner.get("client_cert", "")
+    except Exception:
+        pass
+    for c in context.cookies():
+        if c["name"] == "s_v_web_id":
+            security["s_v_web_id"] = c["value"]
+            break
+
+    # 落盘
+    if init_body:
+        if isinstance(init_body, str):
+            init_body = init_body.encode("latin-1")
+        open(str(INIT_REQ_BIN), "wb").write(init_body)
+        print(f"  IM 会话数据已保存至 {INIT_REQ_BIN}")
+    else:
+        print("  警告：未能捕获 IM 会话数据")
+    if captured_nicks:
+        json.dump(captured_nicks, open(str(CONTACTS_FILE), "w"), ensure_ascii=False)
+        print(f"  已保存 {len(captured_nicks)} 个联系人昵称/备注")
+    if security:
+        _save_security(security)
+        print(f"  私钥/签名数据已保存至 {SECURITY_FILE}")
+    _secure_write(str(COOKIE_FILE), cookies)
+    print(f"  Cookie 已保存至 {COOKIE_FILE}")
+
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    for k, v in cookies.items():
+        s.cookies.set(k, v, domain=".douyin.com")
+    return s
+
+
+def qr_login(headless: bool = False, qr_sink=None, on_logged_in=None,
+             verify_sink=None, code_provider=None) -> requests.Session:
     """
     扫码登录 — 基于 Playwright + 独立 Chromium（不依赖系统 Chrome）。
     headless:     True 则不弹出窗口（Web 面板用）
     qr_sink:      可选回调 fn(qr_png_b64, qr_url) → 拿到二维码后通知外部
     on_logged_in: 可选回调 fn(cookies: dict) → 刚拿到 sessionid 就触发（让外层尽早告知前端登录成功，
                   init_req/私钥等后续抓取在后台继续）
+    verify_sink:  可选回调 fn(masked_phone) → 扫码后需二次验证时通知外层（带掩码手机号）
+    code_provider: 可选回调 fn() -> str|None → 阻塞拿用户提交的短信验证码
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -992,9 +1136,10 @@ def qr_login(headless: bool = False, qr_sink=None, on_logged_in=None) -> request
             _display_qr(qr_url, qr_b64)
         print("等待扫码确认（最长 2 分钟）...")
 
-        # 轮询 cookies 里是否出现 sessionid
+        # 轮询 cookies 里是否出现 sessionid；其间检测/处理二次验证（MFA 身份验证）
         cookies: dict = {}
         deadline = time.time() + 120
+        verify_done = False
         while time.time() < deadline:
             all_cookies = context.cookies()
             dy_cookies = {c["name"]: c["value"] for c in all_cookies
@@ -1002,93 +1147,120 @@ def qr_login(headless: bool = False, qr_sink=None, on_logged_in=None) -> request
             if dy_cookies.get("sessionid"):
                 cookies = {c["name"]: c["value"] for c in all_cookies}  # 全收
                 break
+            # 扫码确认后抖音可能弹「身份验证」要求短信码 → 自动驱动
+            if not verify_done:
+                try:
+                    if _handle_mfa_verify(page, verify_sink, code_provider):
+                        verify_done = True
+                        deadline = max(deadline, time.time() + 120)  # 验证后多给时间出 sessionid
+                except Exception as _ve:
+                    print(f"  [verify] 处理异常: {_ve}")
             time.sleep(1)
 
         if not cookies.get("sessionid"):
             browser.close()
             raise RuntimeError("登录超时，未检测到 sessionid")
 
-        print("✓ 登录成功，正在捕获 IM 会话数据和联系人昵称...")
-
-        # 立即写 cookies 文件 + 回调外层，让前端尽早感知成功
-        try:
-            _secure_write(str(COOKIE_FILE), cookies)
-        except Exception as _e:
-            print(f"  预落 cookies 失败: {_e}")
-        if on_logged_in is not None:
-            try: on_logged_in(cookies)
-            except Exception as _e: print(f"  on_logged_in 回调异常: {_e}")
-
-        # 导航到 douyin.com，同步等 get_message_by_init 请求
-        init_body: bytes | None = None
-        try:
-            with page.expect_request(
-                lambda r: "get_message_by_init" in r.url and r.method == "POST",
-                timeout=30000,
-            ) as init_info:
-                page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
-            req = init_info.value
-            init_body = req.post_data_buffer
-        except Exception as e:
-            print(f"  警告: 抓取 init_req 失败: {e}")
-
-        # 多等 10 秒让前端拉完 spotlight/relation 等昵称接口
-        try:
-            page.wait_for_timeout(10000)
-        except Exception:
-            pass
-
-        # 抓 localStorage 私钥等
-        security: dict = {}
-        try:
-            crypt = page.evaluate('localStorage["security-sdk/s_sdk_crypt_sdk"] || ""') or ""
-            if crypt:
-                inner = json.loads(json.loads(crypt)["data"])
-                security["private_key"] = inner.get("ec_privateKey", "")
-        except Exception as e:
-            print(f"  抓私钥失败: {e}")
-        try:
-            wp = page.evaluate('localStorage["security-sdk/s_sdk_sign_data_key/web_protect"] || ""') or ""
-            if wp:
-                inner = json.loads(json.loads(wp)["data"])
-                security["ticket"]      = inner.get("ticket", "")
-                security["ts_sign"]     = inner.get("ts_sign", "")
-                security["client_cert"] = inner.get("client_cert", "")
-        except Exception:
-            pass
-        # s_v_web_id
-        for c in context.cookies():
-            if c["name"] == "s_v_web_id":
-                security["s_v_web_id"] = c["value"]
-                break
-
+        s = _capture_and_finish(page, context, cookies, captured_nicks, on_logged_in)
         browser.close()
-
-    # 落盘
-    if init_body:
-        if isinstance(init_body, str):
-            init_body = init_body.encode("latin-1")
-        open(str(INIT_REQ_BIN), "wb").write(init_body)
-        print(f"  IM 会话数据已保存至 {INIT_REQ_BIN}")
-    else:
-        print("  警告：未能捕获 IM 会话数据")
-
-    if captured_nicks:
-        json.dump(captured_nicks, open(str(CONTACTS_FILE), "w"), ensure_ascii=False)
-        print(f"  已保存 {len(captured_nicks)} 个联系人昵称/备注")
-
-    if security:
-        _save_security(security)
-        print(f"  私钥/签名数据已保存至 {SECURITY_FILE}")
-
-    _secure_write(str(COOKIE_FILE), cookies)
-    print(f"  Cookie 已保存至 {COOKIE_FILE}")
-
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    for k, v in cookies.items():
-        s.cookies.set(k, v, domain=".douyin.com")
     return s
+
+
+def sms_login_browser(mobile: str, headless: bool = True,
+                      send_sink=None, code_provider=None, on_logged_in=None) -> requests.Session:
+    """短信验证码登录 — Playwright 驱动浏览器（避开纯 HTTP 的 msToken/滑块问题）。
+    流程：开登录页 → 切「验证码登录」→ 填手机号 → 点「获取验证码」→ send_sink() 通知前端已发码
+         → code_provider() 阻塞拿码 → 填码点「登录」→（必要时 _handle_mfa_verify）→ 拿 sessionid。
+    mobile:        纯数字手机号（不含 +86）
+    send_sink():   可选回调 → 验证码已下发、可让前端显示输入框
+    code_provider() -> str|None: 阻塞拿用户提交的验证码
+    on_logged_in: fn(cookies) → 刚拿到 sessionid 即触发
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("未安装 Playwright，请先 pip install playwright && python3 -m playwright install chromium")
+
+    mobile = (mobile or "").lstrip("+").replace(" ", "").strip()
+    if mobile.startswith("86") and len(mobile) > 11:
+        mobile = mobile[2:]
+    if not mobile:
+        raise RuntimeError("手机号为空")
+
+    captured_nicks: dict = {}
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, args=["--disable-blink-features=AutomationControlled"])
+        context = browser.new_context(user_agent=UA, viewport={"width": 800, "height": 600})
+        page = context.new_page()
+
+        def on_response(resp):
+            if any(k in resp.url for k in ["user/info", "user/profile", "im/user", "imfriend",
+                                            "aweme/v1/web/user", "im/contact", "relation/follow"]):
+                try: _extract_contacts(resp.json(), captured_nicks)
+                except Exception: pass
+        page.on("response", on_response)
+
+        print("正在加载登录页面（短信登录）...")
+        page.goto("https://www.douyin.com/login_page?service=https%3A%2F%2Fwww.douyin.com",
+                  wait_until="domcontentloaded")
+        # 切到「验证码登录」（默认可能是扫码）
+        try:
+            page.get_by_text("验证码登录", exact=True).first.click(timeout=8000)
+        except Exception:
+            pass
+        # 填手机号
+        page.get_by_placeholder("请输入手机号").first.fill(mobile, timeout=10000)
+        # 点「获取验证码」
+        page.get_by_text("获取验证码", exact=True).first.click(timeout=8000)
+        # 等待已发码（按钮变「xx s后重新发送」）；若弹滑块则人/失败
+        try:
+            page.wait_for_selector("text=后重新发送", timeout=20000)
+            print("  验证码已发送")
+        except Exception:
+            print("  警告: 未检测到发码成功提示（可能弹了滑块）")
+        if send_sink is not None:
+            try: send_sink()
+            except Exception: pass
+
+        # 阻塞拿用户验证码
+        if code_provider is None:
+            browser.close()
+            raise RuntimeError("缺少 code_provider，无法拿验证码")
+        code = code_provider()
+        if not code:
+            browser.close()
+            raise RuntimeError("未拿到验证码（超时/取消）")
+
+        # 填验证码（登录页那个验证码框）+ 点「登录」
+        page.get_by_placeholder("请输入验证码").first.fill(str(code).strip(), timeout=10000)
+        page.get_by_text("登录", exact=True).first.click(timeout=8000)
+
+        # 轮询 sessionid；其间兜底处理可能的二次验证
+        cookies: dict = {}
+        deadline = time.time() + 90
+        verify_done = False
+        while time.time() < deadline:
+            all_cookies = context.cookies()
+            if {c["name"]: c["value"] for c in all_cookies if "douyin" in c.get("domain", "")}.get("sessionid"):
+                cookies = {c["name"]: c["value"] for c in all_cookies}
+                break
+            if not verify_done:
+                try:
+                    if _handle_mfa_verify(page, (lambda _m: None) if send_sink else None, code_provider):
+                        verify_done = True
+                        deadline = max(deadline, time.time() + 90)
+                except Exception as _ve:
+                    print(f"  [verify] 处理异常: {_ve}")
+            time.sleep(1)
+
+        if not cookies.get("sessionid"):
+            browser.close()
+            raise RuntimeError("登录超时，未检测到 sessionid（验证码可能错误或被风控）")
+
+        s = _capture_and_finish(page, context, cookies, captured_nicks, on_logged_in)
+        browser.close()
+    return s
+
 
 def refresh_contacts() -> dict:
     """
