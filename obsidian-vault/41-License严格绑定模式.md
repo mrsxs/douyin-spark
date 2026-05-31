@@ -76,7 +76,7 @@ docker exec douyin-spark python -c "from app.license import _machine_id; print(_
 ### Step 2：卖家签 license
 
 ```bash
-cd /Users/apple/item
+cd /Users/apple/code/python/抖音续火花
 
 python3 tools/issue_license.py \
     --days 365 \

@@ -66,7 +66,7 @@ python tools/issue_license.py --days 365 --machine abc123 --note "客户B"
 ## 2. 把代码推到 GitHub（私有仓库）
 
 ```bash
-cd /Users/apple/item
+cd /Users/apple/code/python/抖音续火花
 
 # 初始化 git（如果还没）
 git init

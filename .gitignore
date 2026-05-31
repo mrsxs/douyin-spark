@@ -56,3 +56,6 @@ fetch_security.py
 .vscode/
 .idea/
 *.swp
+
+# CodeGraph 本地索引产物
+.codegraph/
