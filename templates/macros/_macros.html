@@ -58,6 +58,55 @@
   可选：confirm_text (默认"确认")、cancel_text (默认"取消")、danger (按钮变红色)
   confirm_action: 点击"确认"时执行的 Alpine 表达式（不含关闭 modal，macro 自己处理）
 #}
+{#
+  apple_modal: Apple 风弹窗壳（暗化遮罩 + 居中圆角玻璃面板 + 头部/底部条）
+  必传：ref, toggle_var
+  可选：size sm/md/lg/xl/2xl，title, subtitle, danger
+  body 放在 caller() 内（自带 padding，不需要再加）
+#}
+{% macro apple_modal(ref, toggle_var, size='md', title=None, subtitle=None, danger=False) %}
+  {% set widths = {'sm':'max-w-sm','md':'max-w-md','lg':'max-w-lg','xl':'max-w-xl','2xl':'max-w-2xl','3xl':'max-w-3xl'} %}
+  {% set w = widths.get(size, 'max-w-md') %}
+<dialog x-ref="{{ ref }}"
+        x-effect="{{ toggle_var }} ? (!$refs.{{ ref }}.open && $refs.{{ ref }}.showModal()) : ($refs.{{ ref }}.open && $refs.{{ ref }}.close())"
+        @close="{{ toggle_var }}=false"
+        class="p-0 bg-transparent backdrop:bg-slate-900/60 w-full {{ w }}">
+  <div class="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-apple-lg overflow-hidden">
+    {% if title %}
+    <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h3 class="font-semibold text-base {% if danger %}text-ios-red{% else %}text-ios-label dark:text-slate-100{% endif %}">{{ title }}</h3>
+        {% if subtitle %}<div class="text-xs text-ios-label3 mt-0.5">{{ subtitle }}</div>{% endif %}
+      </div>
+      <button type="button" @click="{{ toggle_var }}=false"
+              class="shrink-0 w-8 h-8 rounded-full bg-ios-fill3 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 inline-flex items-center justify-center text-ios-label2 dark:text-slate-300"
+              aria-label="关闭">
+        <iconify-icon icon="lucide:x" width="16" height="16"></iconify-icon>
+      </button>
+    </div>
+    {% endif %}
+    {{ caller() }}
+  </div>
+</dialog>
+{% endmacro %}
+
+{# 一行：图标 + 标题 + 副标题；用于卡内的"状态行"、"步骤行" #}
+{% macro icon_row(icon, title, subtitle='', tone='tint') %}
+  {% set tones = {'tint':['bg-ios-tintBg','text-ios-tint'],'blue':['bg-ios-blueBg','text-ios-blue'],
+                  'green':['bg-ios-greenBg','text-ios-green'],'red':['bg-ios-redBg','text-ios-red'],
+                  'purple':['bg-ios-purpleBg','text-ios-purple'],'gray':['bg-ios-fill3','text-ios-label2']} %}
+  {% set t = tones.get(tone, tones['tint']) %}
+  <div class="flex items-center gap-3">
+    <div class="shrink-0 w-9 h-9 rounded-xl {{ t[0] }} flex items-center justify-center">
+      <iconify-icon icon="lucide:{{ icon }}" width="18" height="18" class="{{ t[1] }}"></iconify-icon>
+    </div>
+    <div class="min-w-0">
+      <div class="text-sm font-medium text-ios-label dark:text-slate-100 truncate">{{ title }}</div>
+      {% if subtitle %}<div class="text-xs text-ios-label3 truncate">{{ subtitle }}</div>{% endif %}
+    </div>
+  </div>
+{% endmacro %}
+
 {% macro confirm_modal(ref, toggle_var, title, body, confirm_action='', confirm_text='确认', cancel_text='取消', danger=False) %}
 <dialog x-ref="{{ ref }}"
         x-effect="{{ toggle_var }} ? (!$refs.{{ ref }}.open && $refs.{{ ref }}.showModal()) : ($refs.{{ ref }}.open && $refs.{{ ref }}.close())"

@@ -15,6 +15,7 @@ from ..db import get_db
 from ..models import User, LicenseCode, DouyinAccount, AuditLog, Announcement, AppSetting
 from ..deps import page_require_admin, require_admin
 from ..security import hash_password
+from ..notify import notify
 
 router = APIRouter(prefix="/admin")
 
@@ -22,6 +23,19 @@ router = APIRouter(prefix="/admin")
 def _gen_code(length: int = 16) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 去掉 I/O/0/1 避免混淆
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _broadcast_announcement(db: Session, ann: Announcement) -> int:
+    """把启用的公告广播到每个活跃用户的站内通知。返回推送数。
+    kind="announcement" 不在 _EMAIL_KINDS 里，默认不发邮件。
+    """
+    rows = db.query(User.id).filter(User.is_active == True).all()
+    content = (ann.content or "")[:500]
+    for (uid,) in rows:
+        notify(db, user_id=uid, kind="announcement",
+               title=f"[公告] {ann.title}",
+               content=content, url="/dashboard")
+    return len(rows)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -312,9 +326,11 @@ def admin_announcement_new(
     )
     db.add(ann)
     db.flush()   # 生成 ann.id 供 audit 使用，否则 target_id 会是字符串 "None"
+    pushed = _broadcast_announcement(db, ann) if ann.enabled else 0
     db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
                     action="announcement_new", target_type="announcement",
-                    target_id=str(ann.id), meta=json.dumps({"title": ann.title})))
+                    target_id=str(ann.id),
+                    meta=json.dumps({"title": ann.title, "pushed": pushed})))
     db.commit()
     return RedirectResponse("/admin/announcements", status_code=302)
 
@@ -329,13 +345,17 @@ def admin_announcement_edit(
     ann = db.get(Announcement, ann_id)
     if not ann:
         raise HTTPException(404)
+    was_enabled = ann.enabled
     ann.title   = title.strip()[:120] or ann.title
     ann.content = content.strip()
     ann.enabled = (enabled == "on")
     ann.updated_by = admin.id
+    # 禁用 → 启用 时再广播一次；其他编辑不重复推送，避免微调骚扰
+    pushed = _broadcast_announcement(db, ann) if (not was_enabled and ann.enabled) else 0
     db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
                     action="announcement_edit", target_type="announcement",
-                    target_id=str(ann.id)))
+                    target_id=str(ann.id),
+                    meta=json.dumps({"pushed": pushed})))
     db.commit()
     return RedirectResponse("/admin/announcements", status_code=302)
 
@@ -352,6 +372,28 @@ def admin_announcement_delete(
     db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
                     action="announcement_delete", target_type="announcement",
                     target_id=str(ann_id)))
+    db.commit()
+    return RedirectResponse("/admin/announcements", status_code=302)
+
+
+@router.post("/announcements/{ann_id}/broadcast")
+def admin_announcement_broadcast(
+    request: Request, ann_id: int,
+    admin = Depends(page_require_admin), db: Session = Depends(get_db),
+):
+    """把这条公告再推一次给所有活跃用户的站内通知（不发邮件）。
+    用于历史公告补推、或想再提醒一次时。
+    """
+    ann = db.get(Announcement, ann_id)
+    if not ann:
+        raise HTTPException(404)
+    if not ann.enabled:
+        raise HTTPException(400, "公告未启用，无法广播")
+    pushed = _broadcast_announcement(db, ann)
+    db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
+                    action="announcement_broadcast", target_type="announcement",
+                    target_id=str(ann.id),
+                    meta=json.dumps({"pushed": pushed})))
     db.commit()
     return RedirectResponse("/admin/announcements", status_code=302)
 

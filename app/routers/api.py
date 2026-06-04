@@ -40,13 +40,23 @@ def api_refresh(
     acc = _get_acc(payload, user, db)
     try:
         contacts, templates = trigger.get_contacts(user.id, acc.id)
-        # 补昵称：对 nickname == uid（没抓到昵称的联系人）主动调 fetch_nicknames 兜底
-        missing = [c for c in contacts if (c.get("nickname") or "") == c.get("uid")]
+        # 补昵称/头像：缺昵称（nickname==uid）或缺头像的联系人，主动调 fetch_nicknames 兜底
+        missing = [c for c in contacts
+                   if (c.get("nickname") or "") == c.get("uid") or not c.get("avatar")]
         filled = 0
-        if missing:
+        # 同时：自己的账户没头像 → 拉 self profile 写入 DouyinAccount.avatar
+        need_self_avatar = acc.dy_uid and not acc.avatar
+        if missing or need_self_avatar:
             try:
                 set_account_ctx(AccountCtx(user.id, acc.id))
                 session = dy._load_session()
+                if session and need_self_avatar:
+                    self_prof = dy.fetch_self_profile(session, acc.dy_uid)
+                    if self_prof.get("avatar"):
+                        acc.avatar = self_prof["avatar"]
+                        if self_prof.get("nickname") and not acc.nickname:
+                            acc.nickname = self_prof["nickname"]
+                        db.commit()
                 if session:
                     captured = dy.fetch_nicknames(session, missing)
                     if captured:
@@ -57,7 +67,15 @@ def api_refresh(
                             existing = json.load(open(cache_path)) if _os.path.exists(cache_path) else {}
                         except Exception:
                             existing = {}
-                        existing.update(captured)
+                        # 逐字段合并，避免本轮没拿到的字段（如某次只回头像没回昵称）
+                        # 把已有的昵称/备注清掉
+                        for uid, info in captured.items():
+                            prev = existing.get(uid) if isinstance(existing.get(uid), dict) else {}
+                            merged = dict(prev)
+                            for k in ("nick", "remark", "avatar"):
+                                if info.get(k):
+                                    merged[k] = info[k]
+                            existing[uid] = merged
                         cache_dir = _os.path.dirname(cache_path) or "."
                         _os.makedirs(cache_dir, exist_ok=True)
                         fd, tmp_path = _tf.mkstemp(dir=cache_dir, prefix=".tmp_", suffix=".json")
@@ -75,18 +93,21 @@ def api_refresh(
                         from ..models import Contact
                         for uid, info in captured.items():
                             nick = (info.get("remark") or info.get("nick") or "").strip()
-                            if not nick or nick == uid:
-                                continue
-                            row = db.query(Contact).filter(
-                                Contact.douyin_account_id == acc.id,
-                                Contact.uid == uid).first()
-                            if row:
-                                row.nickname = nick
+                            avatar = (info.get("avatar") or "").strip()
+                            if nick and nick != uid:
+                                row = db.query(Contact).filter(
+                                    Contact.douyin_account_id == acc.id,
+                                    Contact.uid == uid).first()
+                                if row:
+                                    row.nickname = nick
                             # 同步更新返回给前端的 contacts 列表（避免 reload 后才看到）
                             for c in contacts:
                                 if c.get("uid") == uid:
-                                    c["nickname"] = nick
-                                    filled += 1
+                                    if nick and nick != uid:
+                                        c["nickname"] = nick
+                                        filled += 1
+                                    if avatar:
+                                        c["avatar"] = avatar
                                     break
                         db.commit()
             except Exception as e:

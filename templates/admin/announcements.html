@@ -1,101 +1,121 @@
-{% extends "base.html" %}
-{% block title %}公告管理 · 管理后台{% endblock %}
-{% block content %}
-<div x-data="{ editId: null, editTitle: '', editContent: '', editEnabled: true, delId: null, delTitle: '' }">
+{% extends "admin/_layout.html" %}
+{% from "macros/_macros.html" import apple_modal %}
+{% set active_nav = "announcements" %}
+{% block page_title %}公告管理{% endblock %}
+{% block page_subtitle %}用户登录后会看到已启用的最新一条公告{% endblock %}
+{% block page_actions %}
+  <button @click="editId='new'; editTitle=''; editContent=''; editEnabled=true; editOpen=true" class="apple-btn-tint">
+    <iconify-icon icon="lucide:plus" width="16" height="16"></iconify-icon>
+    新建公告
+  </button>
+{% endblock %}
 
-<div class="mb-6 flex items-center justify-between">
-  <div>
-    <div class="text-sm text-slate-500"><a href="/admin" class="hover:underline">← 管理后台</a></div>
-    <h1 class="text-2xl font-bold mt-1">公告管理</h1>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">用户登录后会看到已启用的最新一条公告弹窗（同一条只弹一次，内容更新后会再弹）</p>
-  </div>
-  <button @click="editId='new'; editTitle=''; editContent=''; editEnabled=true; $refs.editModal.showModal()" class="btn-primary">+ 新建公告</button>
-</div>
+{% block admin_content %}
+<div x-data="{ editId: null, editTitle: '', editContent: '', editEnabled: true, editOpen: false, delId: null, delTitle: '', delOpen: false }">
 
 {% if items %}
-<div class="card overflow-hidden">
-  <table class="w-full">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
-      <tr>
-        <th class="px-4 py-3 text-left w-10">#</th>
-        <th class="px-4 py-3 text-left">标题 / 内容</th>
-        <th class="px-4 py-3 text-center w-20">启用</th>
-        <th class="px-4 py-3 text-left w-40">更新时间</th>
-        <th class="px-4 py-3 text-center w-32">操作</th>
-      </tr>
-    </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
-      {% for a in items %}
-      <tr>
-        <td class="px-4 py-3 text-sm text-slate-500">{{ a.id }}</td>
-        <td class="px-4 py-3">
-          <div class="font-medium">{{ a.title }}</div>
-          <div class="text-xs text-slate-500 mt-1 line-clamp-2 whitespace-pre-wrap">{{ a.content[:200] }}{% if a.content|length > 200 %}…{% endif %}</div>
-        </td>
-        <td class="px-4 py-3 text-center">
+<div class="space-y-3">
+  {% for a in items %}
+  <div class="apple-card-solid p-5">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <h3 class="font-semibold text-ios-label dark:text-slate-100">{{ a.title }}</h3>
           {% if a.enabled %}
-            <span class="pill pill-green">启用</span>
+            <span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>启用</span>
           {% else %}
-            <span class="pill pill-slate">停用</span>
+            <span class="apple-chip-gray">停用</span>
           {% endif %}
-        </td>
-        <td class="px-4 py-3 text-sm text-slate-500">{{ a.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
-        <td class="px-4 py-3 text-center whitespace-nowrap">
-          <button type="button"
-                  @click="editId={{ a.id }}; editTitle={{ a.title|tojson }}; editContent={{ a.content|tojson }}; editEnabled={{ 'true' if a.enabled else 'false' }}; $refs.editModal.showModal()"
-                  class="btn-sec text-xs">编辑</button>
-          <button type="button"
-                  @click="delId={{ a.id }}; delTitle={{ a.title|tojson }}; $refs.delModal.showModal()"
-                  class="btn-sec text-xs !text-rose-600">删除</button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+        </div>
+        <div class="text-sm text-ios-label2 mt-2 whitespace-pre-wrap leading-relaxed">{{ a.content[:300] }}{% if a.content|length > 300 %}…{% endif %}</div>
+        <div class="text-xs text-ios-label3 mt-3 flex items-center gap-1">
+          <iconify-icon icon="lucide:calendar" width="13" height="13"></iconify-icon>
+          {{ a.updated_at.strftime("%Y-%m-%d %H:%M") }}
+        </div>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        {% if a.enabled %}
+        <form method="post" action="/admin/announcements/{{ a.id }}/broadcast"
+              onsubmit="return confirm('将向所有活跃用户的通知中心再推一次「{{ a.title }}」，确认？')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" class="text-sm text-ios-tint font-medium hover:underline"
+                  title="把这条公告推到所有用户的铃铛通知里">广播</button>
+        </form>
+        {% endif %}
+        <button type="button"
+                @click="editId={{ a.id }}; editTitle={{ a.title|tojson }}; editContent={{ a.content|tojson }}; editEnabled={{ 'true' if a.enabled else 'false' }}; editOpen=true"
+                class="text-sm text-ios-blue font-medium hover:underline">编辑</button>
+        <button type="button"
+                @click="delId={{ a.id }}; delTitle={{ a.title|tojson }}; delOpen=true"
+                class="text-sm text-ios-red font-medium hover:underline">删除</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
 </div>
 {% else %}
-<div class="card p-12 text-center text-slate-500">
-  还没有公告。点击右上角「+ 新建公告」创建第一条。
+<div class="apple-card-solid p-12 text-center">
+  <div class="w-14 h-14 mx-auto rounded-xl bg-ios-blueBg flex items-center justify-center mb-3">
+    <iconify-icon icon="lucide:megaphone" width="28" height="28" class="text-ios-blue"></iconify-icon>
+  </div>
+  <div class="text-ios-label3">还没有公告</div>
+  <button @click="editId='new'; editTitle=''; editContent=''; editEnabled=true; editOpen=true" class="apple-btn-tint mt-4">+ 创建第一条公告</button>
 </div>
 {% endif %}
 
-<!-- 编辑/新建 Modal -->
-<dialog x-ref="editModal" class="rounded-xl p-0 backdrop:bg-slate-900/50">
+{% call apple_modal('editModal', 'editOpen', size='lg', title=None) %}
   <form method="post"
         :action="editId==='new' ? '/admin/announcements/new' : ('/admin/announcements/' + editId + '/edit')"
-        class="bg-white dark:bg-slate-800 p-6 w-[36rem] max-w-[92vw]">
+        class="p-5">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <h3 class="text-lg font-semibold mb-4" x-text="editId==='new' ? '新建公告' : '编辑公告 #' + editId"></h3>
-    <label class="label">标题</label>
-    <input name="title" x-model="editTitle" class="input" required maxlength="120" autofocus />
-    <label class="label mt-4">内容（支持换行）</label>
-    <textarea name="content" x-model="editContent" class="input min-h-[160px] font-normal" required></textarea>
-    <label class="flex items-center gap-2 mt-4">
-      <input type="checkbox" name="enabled" value="on" :checked="editEnabled" @change="editEnabled=$event.target.checked" class="w-4 h-4 accent-brand-600" />
-      <span class="text-sm">立即启用（停用时不会向用户展示）</span>
-    </label>
+    <h3 class="text-lg font-semibold text-ios-label dark:text-slate-100 mb-4"
+        x-text="editId==='new' ? '新建公告' : '编辑公告 #' + editId"></h3>
+    <div class="space-y-4">
+      <div>
+        <label class="label">标题</label>
+        <input name="title" x-model="editTitle" class="input" required maxlength="120" autofocus />
+      </div>
+      <div>
+        <label class="label">内容（支持换行）</label>
+        <textarea name="content" x-model="editContent" class="input min-h-[160px] font-normal" required></textarea>
+      </div>
+      <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <span class="text-sm font-medium text-ios-label dark:text-slate-100">立即启用</span>
+        <input type="checkbox" name="enabled" value="on" :checked="editEnabled" @change="editEnabled=$event.target.checked" class="sr-only" id="ann-en" />
+        <div class="ios-switch" :class="editEnabled ? 'ios-switch-on' : 'ios-switch-off'"
+             @click="document.getElementById('ann-en').click()">
+          <div class="ios-switch-knob"></div>
+        </div>
+      </label>
+    </div>
     <div class="flex justify-end gap-2 mt-6">
-      <button type="button" @click="$refs.editModal.close()" class="btn-sec">取消</button>
-      <button type="submit" class="btn-primary">保存</button>
+      <button type="button" @click="editOpen=false" class="apple-btn-sec">取消</button>
+      <button type="submit" class="apple-btn-tint">
+        <iconify-icon icon="lucide:save" width="15" height="15"></iconify-icon>
+        保存
+      </button>
     </div>
   </form>
-</dialog>
+{% endcall %}
 
-<!-- 删除 Modal -->
-<dialog x-ref="delModal" class="rounded-xl p-0 backdrop:bg-slate-900/50">
-  <form method="post" :action="'/admin/announcements/' + delId + '/delete'"
-        class="bg-white dark:bg-slate-800 p-6 w-96 max-w-[90vw]">
+{% call apple_modal('delModal', 'delOpen', size='sm', title=None) %}
+  <form method="post" :action="'/admin/announcements/' + delId + '/delete'" class="p-6">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <h3 class="text-lg font-semibold mb-2">删除公告</h3>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">
-      确认删除公告「<strong x-text="delTitle"></strong>」？此操作不可恢复。
-    </p>
-    <div class="flex justify-end gap-2 mt-6">
-      <button type="button" @click="$refs.delModal.close()" class="btn-sec">取消</button>
-      <button type="submit" class="btn-primary !bg-rose-600 hover:!bg-rose-700">确认删除</button>
+    <div class="flex flex-col items-center text-center">
+      <div class="w-14 h-14 rounded-full bg-ios-redBg flex items-center justify-center mb-3">
+        <iconify-icon icon="lucide:trash-2" width="26" height="26" class="text-ios-red"></iconify-icon>
+      </div>
+      <h3 class="text-lg font-bold text-ios-label dark:text-slate-100">删除公告？</h3>
+      <p class="text-sm text-ios-label2 mt-2 leading-relaxed">
+        将永久删除「<strong x-text="delTitle"></strong>」，此操作不可恢复。
+      </p>
+    </div>
+    <div class="grid grid-cols-2 gap-2 mt-6">
+      <button type="button" @click="delOpen=false" class="apple-btn-sec">取消</button>
+      <button type="submit" class="apple-btn-red">删除</button>
     </div>
   </form>
-</dialog>
+{% endcall %}
 
 </div>
 {% endblock %}

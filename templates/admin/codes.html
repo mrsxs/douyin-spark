@@ -1,126 +1,130 @@
-{% extends "base.html" %}
-{% block title %}授权码 · 管理后台{% endblock %}
-{% block content %}
-<div class="mb-6 flex items-start justify-between">
-  <div>
-    <div class="text-sm text-slate-500"><a href="/admin" class="hover:underline">← 管理后台</a></div>
-    <h1 class="text-2xl font-bold mt-1">授权码</h1>
-  </div>
-  <button @click="$refs.genModal.showModal()" class="btn-primary">
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-    生成新授权码
+{% extends "admin/_layout.html" %}
+{% from "macros/_macros.html" import apple_modal %}
+{% set active_nav = "codes" %}
+{% block page_title %}授权码{% endblock %}
+{% block page_subtitle %}共 {{ total }} 张{% endblock %}
+{% block page_actions %}
+  <a href="/admin/codes.csv?filter={{ filter }}" class="apple-btn-sec">
+    <iconify-icon icon="lucide:download" width="15" height="15"></iconify-icon>
+    导出 CSV
+  </a>
+  <button @click="genOpen=true" class="apple-btn-tint">
+    <iconify-icon icon="lucide:plus" width="16" height="16"></iconify-icon>
+    生成授权码
   </button>
+{% endblock %}
+
+{% block admin_content %}
+<div x-data="{ genOpen: false }">
+
+<div class="ios-seg mb-4">
+  {% for f, l in [("all","全部"), ("unused","未使用"), ("used","已使用"), ("revoked","已作废")] %}
+  <a href="?filter={{ f }}" class="ios-seg-item {% if filter == f %}on{% endif %}">{{ l }}</a>
+  {% endfor %}
 </div>
 
-<div class="card p-3 mb-4">
-  <nav class="flex gap-2">
-    {% set filters = [("all","全部"), ("unused","未使用"), ("used","已使用"), ("revoked","已作废")] %}
-    {% for f, l in filters %}
-    <a href="?filter={{ f }}"
-       class="px-3 py-1.5 rounded-lg text-sm {% if filter == f %}bg-brand-600 text-white{% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700{% endif %}">{{ l }}</a>
-    {% endfor %}
-    <div class="flex-1"></div>
-    <a href="/admin/codes.csv?filter={{ filter }}" class="btn-sec text-sm">下载 CSV</a>
-  </nav>
-</div>
-
-<div class="card overflow-hidden">
+<div class="apple-card-solid overflow-hidden">
   <table class="w-full text-sm">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+    <thead class="bg-ios-fill2 dark:bg-slate-700/30 text-xs text-ios-label3 font-medium">
       <tr>
-        <th class="px-4 py-3 text-left">授权码</th>
-        <th class="px-4 py-3 text-left">时长/账户数</th>
-        <th class="px-4 py-3 text-left">备注</th>
-        <th class="px-4 py-3 text-left">状态</th>
-        <th class="px-4 py-3 text-left">使用者</th>
-        <th class="px-4 py-3 text-left">生成时间</th>
-        <th class="px-4 py-3"></th>
+        <th class="px-5 py-3 text-left">授权码</th>
+        <th class="px-5 py-3 text-left">时长 / 账户数</th>
+        <th class="px-5 py-3 text-left">备注</th>
+        <th class="px-5 py-3 text-left">状态</th>
+        <th class="px-5 py-3 text-left">使用者</th>
+        <th class="px-5 py-3 text-left">生成时间</th>
+        <th class="px-5 py-3"></th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
       {% for c in codes %}
-      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-        <td class="px-4 py-3">
+      <tr class="hover:bg-ios-fill2/50 dark:hover:bg-slate-700/20">
+        <td class="px-5 py-3">
           <div class="flex items-center gap-2">
-            <code class="font-mono text-xs">{{ c.code }}</code>
-            <button onclick="navigator.clipboard.writeText('{{ c.code }}');toast('已复制')" class="text-slate-400 hover:text-slate-700">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" /></svg>
+            <code class="font-mono text-xs text-ios-label dark:text-slate-100">{{ c.code }}</code>
+            <button onclick="navigator.clipboard.writeText('{{ c.code }}');toast('已复制')"
+                    class="text-ios-label3 hover:text-ios-blue" title="复制">
+              <iconify-icon icon="lucide:copy" width="14" height="14"></iconify-icon>
             </button>
           </div>
         </td>
-        <td class="px-4 py-3 text-slate-600 dark:text-slate-400">{{ c.duration_days }}天 · {{ c.max_accounts }}账户</td>
-        <td class="px-4 py-3 text-slate-500 text-xs">{{ c.note or "-" }}</td>
-        <td class="px-4 py-3">
-          {% if c.revoked_at %}<span class="pill pill-slate">已作废</span>
-          {% elif c.used_by %}<span class="pill pill-amber">已使用</span>
-          {% else %}<span class="pill pill-green">未使用</span>{% endif %}
+        <td class="px-5 py-3 text-ios-label2 text-xs">{{ c.duration_days }} 天 · {{ c.max_accounts }} 账户</td>
+        <td class="px-5 py-3 text-ios-label3 text-xs">{{ c.note or "—" }}</td>
+        <td class="px-5 py-3">
+          {% if c.revoked_at %}<span class="apple-chip-gray">已作废</span>
+          {% elif c.used_by %}<span class="apple-chip-green">已使用</span>
+          {% else %}<span class="apple-chip-blue">未使用</span>{% endif %}
         </td>
-        <td class="px-4 py-3">
+        <td class="px-5 py-3">
           {% if c.used_by %}
-            <a href="/admin/users/{{ c.used_by }}" class="text-brand-600 dark:text-brand-400 hover:underline">
+            <a href="/admin/users/{{ c.used_by }}" class="text-ios-blue text-sm hover:underline">
               {{ user_map.get(c.used_by, c.used_by) }}
             </a>
-            <div class="text-xs text-slate-500">{{ c.used_at.strftime("%m-%d %H:%M") if c.used_at else "" }}</div>
-          {% else %}-{% endif %}
+            <div class="text-xs text-ios-label3">{{ c.used_at.strftime("%m-%d %H:%M") if c.used_at else "" }}</div>
+          {% else %}<span class="text-ios-label3">—</span>{% endif %}
         </td>
-        <td class="px-4 py-3 text-slate-500 text-xs">{{ c.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-        <td class="px-4 py-3 text-right">
+        <td class="px-5 py-3 text-ios-label3 font-mono text-xs">{{ c.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        <td class="px-5 py-3 text-right">
           {% if not c.used_by and not c.revoked_at %}
           <form method="post" action="/admin/codes/{{ c.id }}/revoke" onsubmit="return confirm('作废后不可恢复，确认？')" class="inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-            <button class="btn-sec text-xs">作废</button>
+            <button class="text-ios-red text-sm font-medium hover:underline">作废</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">无记录</td></tr>
+      <tr><td colspan="7" class="px-5 py-12 text-center text-ios-label3">无记录</td></tr>
       {% endfor %}
     </tbody>
   </table>
   {% if total > per_page %}
-  <div class="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
-    <div class="text-slate-500">共 {{ total }} 条</div>
+  <div class="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
+    <div class="text-ios-label3">第 {{ page }} 页 · 共 {{ total }} 条</div>
     <div class="flex gap-2">
-      {% if page > 1 %}<a href="?filter={{ filter }}&page={{ page - 1 }}" class="btn-sec text-xs">上一页</a>{% endif %}
-      {% if page * per_page < total %}<a href="?filter={{ filter }}&page={{ page + 1 }}" class="btn-sec text-xs">下一页</a>{% endif %}
+      {% if page > 1 %}<a href="?filter={{ filter }}&page={{ page - 1 }}" class="apple-btn-sec text-xs">← 上一页</a>{% endif %}
+      {% if page * per_page < total %}<a href="?filter={{ filter }}&page={{ page + 1 }}" class="apple-btn-sec text-xs">下一页 →</a>{% endif %}
     </div>
   </div>
   {% endif %}
 </div>
 
-<!-- 生成模态框 -->
-<dialog x-ref="genModal" class="rounded-xl p-0 backdrop:bg-slate-900/50">
-  <form method="post" action="/admin/codes/new" class="bg-white dark:bg-slate-800 p-6 w-[28rem] max-w-[90vw]">
+{% call apple_modal('genModal', 'genOpen', size='md', title='生成授权码', subtitle='填写参数并提交') %}
+  <form method="post" action="/admin/codes/new" class="p-5 space-y-4">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <h3 class="text-lg font-semibold mb-4">生成授权码</h3>
-    <div class="space-y-4">
+    <div>
+      <label class="label">有效天数</label>
+      <div class="flex flex-wrap gap-2 mb-2">
+        {% for d in [30, 90, 180, 365] %}
+        <button type="button" onclick="this.form.duration_days.value={{ d }}"
+                class="px-3 py-1.5 rounded-lg border border-ios-sep bg-white dark:bg-slate-700 dark:border-slate-600 text-xs hover:border-ios-tint hover:text-ios-tint transition">{{ d }} 天</button>
+        {% endfor %}
+      </div>
+      <input type="number" name="duration_days" value="30" min="1" class="input" required />
+    </div>
+    <div class="grid grid-cols-2 gap-3">
       <div>
         <label class="label">生成数量</label>
         <input type="number" name="count" value="1" min="1" max="200" class="input" required />
       </div>
       <div>
-        <label class="label">有效天数</label>
-        <div class="flex gap-2 mb-2">
-          {% for d in [7, 30, 90, 180, 365] %}
-          <button type="button" onclick="this.form.duration_days.value={{ d }}" class="btn-sec text-xs">{{ d }}天</button>
-          {% endfor %}
-        </div>
-        <input type="number" name="duration_days" value="30" min="1" class="input" required />
-      </div>
-      <div>
-        <label class="label">最大抖音账户数</label>
+        <label class="label">账号数上限</label>
         <input type="number" name="max_accounts" value="1" min="1" max="100" class="input" required />
       </div>
-      <div>
-        <label class="label">备注（管理员可见）</label>
-        <input type="text" name="note" class="input" maxlength="200" placeholder="例：月度基础版" />
-      </div>
     </div>
-    <div class="flex justify-end gap-2 mt-6">
-      <button type="button" @click="$refs.genModal.close()" class="btn-sec">取消</button>
-      <button type="submit" class="btn-primary">生成</button>
+    <div>
+      <label class="label">备注（管理员可见）</label>
+      <input type="text" name="note" class="input" maxlength="200" placeholder="例：月度基础版" />
+    </div>
+    <div class="flex justify-end gap-2 pt-2">
+      <button type="button" @click="genOpen=false" class="apple-btn-sec">取消</button>
+      <button type="submit" class="apple-btn-tint">
+        <iconify-icon icon="lucide:plus" width="15" height="15"></iconify-icon>
+        生成
+      </button>
     </div>
   </form>
-</dialog>
+{% endcall %}
+
+</div>
 {% endblock %}

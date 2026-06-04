@@ -1,209 +1,362 @@
 {% extends "base.html" %}
+{% from "macros/_macros.html" import status_pill, apple_modal %}
 {% block title %}{{ acc.nickname or acc.label }} · {{ site_name }}{% endblock %}
 {% block content %}
 <div x-data="accountPage()">
 
-<!-- 顶部信息 -->
-<div class="flex items-center justify-between mb-6">
-  <div>
-    <div class="text-sm text-slate-500"><a href="/dashboard" class="hover:underline">← 返回</a></div>
-    <h1 class="text-2xl font-bold mt-1">{{ acc.nickname or acc.label }}</h1>
-    <div class="text-sm text-slate-500 mt-1">
-      {{ acc.label }}{% if acc.dy_uid %} · uid={{ acc.dy_uid }}{% endif %}
+<!-- Hero：账户卡 -->
+<div class="apple-card-solid p-5 sm:p-6 mb-5 relative overflow-hidden">
+  <div class="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-ios-tint/12 blur-3xl pointer-events-none"></div>
+  <div class="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <div class="flex items-center gap-4 min-w-0">
+      <a href="/dashboard" class="shrink-0 w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2"
+         aria-label="返回">
+        <iconify-icon icon="lucide:arrow-left" width="18" height="18"></iconify-icon>
+      </a>
+      <div class="relative shrink-0 w-14 h-14">
+        <div class="absolute inset-0 rounded-full bg-ios-tintBg flex items-center justify-center text-2xl font-semibold text-ios-tint">
+          {{ (acc.nickname or acc.label)[:1]|upper }}
+        </div>
+        {% if acc.avatar %}
+        <img src="{{ acc.avatar }}" alt="{{ (acc.nickname or acc.label)|e }}" loading="lazy" referrerpolicy="no-referrer"
+             class="relative w-14 h-14 rounded-full object-cover ring-1 ring-slate-200 dark:ring-slate-700"
+             onerror="this.remove()" />
+        {% endif %}
+        <span class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ring-2 ring-white dark:ring-slate-800
+                     {% if acc.status == 'active' %}bg-ios-green{% else %}bg-ios-label3{% endif %}"></span>
+      </div>
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <h1 class="text-xl font-bold text-ios-label dark:text-slate-100 truncate">{{ acc.nickname or acc.label }}</h1>
+          {% if acc.status == 'active' %}
+            <span class="apple-chip-green"><iconify-icon icon="lucide:check" width="11" height="11"></iconify-icon>在线</span>
+          {% else %}
+            <span class="apple-chip-red">{{ acc.status }}</span>
+          {% endif %}
+        </div>
+        <div class="text-xs text-ios-label3 mt-0.5 truncate">
+          {{ acc.label }}{% if acc.dy_uid %} · uid={{ acc.dy_uid }}{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <button @click="runAutoConfirm=true" class="apple-btn-tint" :disabled="running">
+        <iconify-icon icon="lucide:flame" width="16" height="16"></iconify-icon>
+        <span x-show="!running">立即续火花</span>
+        <span x-show="running">运行中…</span>
+      </button>
+      <button @click="batchSend()" class="apple-btn-sec" :disabled="batchRunning">
+        <iconify-icon icon="lucide:send" width="15" height="15"></iconify-icon>
+        <span x-show="!batchRunning">批量发送<span x-show="selectedCount>0" x-text="' ('+selectedCount+')'"></span></span>
+        <span x-show="batchRunning">发送中…</span>
+      </button>
+      <button @click="refreshContacts()" class="apple-btn-sec">
+        <iconify-icon icon="lucide:refresh-cw" width="15" height="15"></iconify-icon>
+        刷新
+      </button>
+      <button @click="checkCookies()" class="apple-btn-sec" :disabled="checking">
+        <iconify-icon icon="lucide:shield-check" width="15" height="15"></iconify-icon>
+        <span x-show="!checking">体检</span>
+        <span x-show="checking">体检中…</span>
+      </button>
+      <a href="/accounts/{{ acc.id }}/runs" class="apple-btn-sec">
+        <iconify-icon icon="lucide:history" width="15" height="15"></iconify-icon>
+        历史
+      </a>
     </div>
   </div>
-  <div class="flex gap-2">
-    <button @click="runAutoConfirm=true" class="btn-primary" :disabled="running">
-      <span x-show="!running">🔥 立即续火花</span>
-      <span x-show="running">运行中...</span>
-    </button>
-    <button @click="batchSend()" class="btn-sec" :disabled="batchRunning">
-      <span x-show="!batchRunning">📨 批量发送 <span x-show="selectedCount>0" x-text="'('+selectedCount+')'"></span></span>
-      <span x-show="batchRunning">发送中...</span>
-    </button>
-    <button @click="refreshContacts()" class="btn-sec">刷新联系人</button>
-    <button @click="checkCookies()" class="btn-sec" :disabled="checking">
-      <span x-show="!checking">🩺 体检登录态</span>
-      <span x-show="checking">体检中...</span>
-    </button>
-    <a href="/accounts/{{ acc.id }}/runs" class="btn-sec">📊 运行历史</a>
+</div>
+
+<!-- 4 个 Stat 卡（火花总数 / 今日已续 / 联系人数 / 需重燃） -->
+{% set max_days = (contacts | map(attribute='days') | list | max) if contacts else 0 %}
+{% set today_sent = (schedule.last_ran_date == now.strftime("%Y-%m-%d")) %}
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-5">
+  <div class="apple-card-solid p-4">
+    <div class="flex items-center justify-between">
+      <div class="text-xs text-ios-label3">最长火花</div>
+      <div class="w-8 h-8 rounded-lg bg-ios-tintBg flex items-center justify-center">
+        <iconify-icon icon="lucide:flame" width="16" height="16" class="text-ios-tint"></iconify-icon>
+      </div>
+    </div>
+    <div class="mt-2 text-2xl font-bold text-ios-label dark:text-slate-100">{{ max_days }}<span class="text-sm font-normal text-ios-label3 ml-1">天</span></div>
+  </div>
+  <div class="apple-card-solid p-4">
+    <div class="flex items-center justify-between">
+      <div class="text-xs text-ios-label3">今日续花</div>
+      <div class="w-8 h-8 rounded-lg bg-ios-greenBg flex items-center justify-center">
+        <iconify-icon icon="lucide:check-check" width="16" height="16" class="text-ios-green"></iconify-icon>
+      </div>
+    </div>
+    <div class="mt-2 text-2xl font-bold text-ios-label dark:text-slate-100">
+      {% if today_sent %}<span class="text-ios-green">已完成</span>{% else %}<span class="text-ios-label3">待运行</span>{% endif %}
+    </div>
+  </div>
+  <div class="apple-card-solid p-4">
+    <div class="flex items-center justify-between">
+      <div class="text-xs text-ios-label3">续火花</div>
+      <div class="w-8 h-8 rounded-lg bg-ios-blueBg flex items-center justify-center">
+        <iconify-icon icon="lucide:users" width="16" height="16" class="text-ios-blue"></iconify-icon>
+      </div>
+    </div>
+    <div class="mt-2 text-2xl font-bold text-ios-label dark:text-slate-100">{{ active_total }}<span class="text-sm font-normal text-ios-label3 ml-1">/ {{ full_total }}</span></div>
+  </div>
+  <div class="apple-card-solid p-4">
+    <div class="flex items-center justify-between">
+      <div class="text-xs text-ios-label3">需重燃</div>
+      <div class="w-8 h-8 rounded-lg bg-ios-redBg flex items-center justify-center">
+        <iconify-icon icon="lucide:flame-kindling" width="16" height="16" class="text-ios-red"></iconify-icon>
+      </div>
+    </div>
+    <div class="mt-2 text-2xl font-bold {% if broken_total %}text-ios-red{% else %}text-ios-label3{% endif %}">{{ broken_total }}</div>
   </div>
 </div>
 
 {% if finalizing %}
-<div class="card p-5 mb-6 bg-amber-50 dark:bg-amber-900/20 !ring-amber-200 dark:!ring-amber-800">
+<div class="apple-card-solid p-5 mb-5 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800">
   <div class="flex items-center gap-4">
-    <svg class="w-6 h-6 text-amber-600 dark:text-amber-400 animate-spin shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-    </svg>
+    <iconify-icon icon="lucide:loader-2" width="24" height="24" class="text-amber-600 animate-spin shrink-0"></iconify-icon>
     <div class="flex-1">
-      <div class="font-medium text-amber-900 dark:text-amber-300">正在完成登录流程...</div>
+      <div class="font-medium text-amber-900 dark:text-amber-300">正在完成登录流程…</div>
       <div class="text-xs text-amber-700 dark:text-amber-400 mt-1">
-        后台正在抓取 IM 会话数据和登录私钥（通常 20-40 秒）。页面会自动刷新，也可以手动刷新查看进度。
+        后台正在抓取 IM 会话数据和登录私钥（通常 20-40 秒）。页面会自动刷新。
       </div>
     </div>
   </div>
 </div>
 <meta http-equiv="refresh" content="5" />
 {% elif load_error %}
-<div class="card p-4 mb-6 bg-rose-50 dark:bg-rose-900/20 !ring-rose-200 dark:!ring-rose-800">
-  <div class="text-sm text-rose-700 dark:text-rose-400">
+<div class="apple-card-solid p-4 mb-5 bg-ios-redBg dark:bg-rose-900/20 border-rose-200 dark:border-rose-800">
+  <div class="text-sm text-rose-700 dark:text-rose-400 flex items-center gap-2">
+    <iconify-icon icon="lucide:triangle-alert" width="16" height="16"></iconify-icon>
     <strong>加载联系人失败</strong>：{{ load_error }}
     <a href="/accounts/{{ acc.id }}/login" class="underline ml-2">重新登录</a>
   </div>
 </div>
+{% elif broken_total %}
+<div class="apple-card-solid p-3.5 mb-5 bg-ios-redBg dark:bg-rose-900/20 border-rose-200 dark:border-rose-800">
+  <div class="flex items-center gap-3">
+    <div class="w-8 h-8 rounded-lg bg-white dark:bg-rose-900/40 flex items-center justify-center shrink-0">
+      <iconify-icon icon="lucide:flame-kindling" width="16" height="16" class="text-ios-red"></iconify-icon>
+    </div>
+    <div class="flex-1 text-sm">
+      <span class="font-medium text-rose-700 dark:text-rose-300">{{ broken_total }} 位好友的火花已断</span>
+      <span class="text-rose-600/80 dark:text-rose-400/80 ml-1">需要你去抖音 App 主动重续</span>
+    </div>
+    <button @click="filter='broken'" class="text-xs font-semibold text-ios-red hover:underline">查看 →</button>
+  </div>
+</div>
 {% endif %}
 
-<!-- Tabs -->
-<div class="border-b border-slate-200 dark:border-slate-700 mb-6">
-  <nav class="flex gap-1 -mb-px">
-    <template x-for="t in tabs" :key="t.key">
-      <button @click="tab=t.key"
-              class="px-4 py-2.5 text-sm font-medium border-b-2 transition"
-              :class="tab===t.key ? 'border-brand-600 text-brand-600 dark:text-brand-400' : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'">
-        <span x-text="t.label"></span>
-      </button>
-    </template>
-  </nav>
-</div>
-
-<!-- 联系人 Tab -->
-<div x-show="tab==='contacts'">
-  <!-- 搜索 + 统计 -->
-  <form method="get" action="/accounts/{{ acc.id }}" class="mb-4 flex items-center gap-2">
-    <input type="text" name="q" value="{{ q }}" placeholder="搜索联系人昵称 / UID / 备注..."
-           class="input max-w-md" />
-    <button type="submit" class="btn-sec">搜索</button>
-    {% if q %}<a href="/accounts/{{ acc.id }}" class="btn-ghost text-sm">清除</a>{% endif %}
-    <div class="ml-auto text-sm text-slate-500 whitespace-nowrap">
-      {% if q %}{{ filtered_total }} / {% endif %}共 {{ full_total }} 人
-    </div>
+<!-- 段控 + 搜索 -->
+<div class="flex flex-wrap items-center gap-3 mb-4">
+  <div class="ios-seg">
+    <button @click="filter='all'"    class="ios-seg-item" :class="filter==='all' ? 'on' : ''">全部 <span class="ml-0.5 text-ios-label3" x-show="filter!=='all'">{{ filtered_total }}</span></button>
+    <button @click="filter='active'" class="ios-seg-item" :class="filter==='active' ? 'on' : ''">续火花</button>
+    <button @click="filter='broken'" class="ios-seg-item" :class="filter==='broken' ? 'on' : ''">需重燃</button>
+  </div>
+  <form method="get" action="/accounts/{{ acc.id }}" class="flex-1 min-w-[200px] max-w-md relative">
+    <iconify-icon icon="lucide:search" width="16" height="16"
+      class="absolute left-3 top-1/2 -translate-y-1/2 text-ios-label3 pointer-events-none"></iconify-icon>
+    <input type="text" name="q" value="{{ q }}" placeholder="搜索昵称 / UID / 备注…"
+           class="input !pl-9 !rounded-xl !bg-ios-fill2 !border-transparent" />
   </form>
-
-  {% if contacts %}
-  <div class="card overflow-x-auto -mx-4 sm:mx-0 sm:rounded-xl">
-    <table class="w-full min-w-[820px]">
-      <thead class="bg-slate-50 dark:bg-slate-700/30 border-b border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-400 uppercase whitespace-nowrap">
-        <tr>
-          <th class="px-3 py-3 text-center w-10">
-            <input type="checkbox" id="select-all" onchange="toggleAll(this)"
-                   class="w-4 h-4 accent-brand-600 cursor-pointer" title="全选" />
-          </th>
-          <th class="px-2 py-3 text-left w-10">#</th>
-          <th class="px-4 py-3 text-left w-48">联系人</th>
-          <th class="px-4 py-3 text-left w-20">火花</th>
-          <th class="px-4 py-3 text-center w-20">启用</th>
-          <th class="px-4 py-3 text-left">消息（每行一条）</th>
-          <th class="px-4 py-3 text-center w-24">操作</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
-        {% for c in contacts %}
-          {% set uid = c['uid'] %}
-          {% set tpl = templates.get(uid, {"enabled": False, "messages": []}) %}
-        <tr data-uid="{{ uid }}">
-          <td class="px-3 py-3 text-center">
-            <input type="checkbox" class="contact-select w-4 h-4 accent-brand-600 cursor-pointer"
-                   value="{{ uid }}" onchange="updateSelectedCount()" />
-          </td>
-          <td class="px-2 py-3 text-sm text-slate-500">{{ (page - 1) * per_page + loop.index }}</td>
-          <td class="px-4 py-3">
-            <div class="font-medium truncate max-w-[180px]" title="{{ c['nickname'] }}">{{ c['nickname'] }}</div>
-            <div class="text-xs text-slate-500 truncate max-w-[180px]" title="{{ uid }}">{{ uid }}</div>
-          </td>
-          <td class="px-4 py-3 whitespace-nowrap">
-            <span class="pill pill-indigo whitespace-nowrap">{{ c['days'] }}天</span>
-          </td>
-          <td class="px-4 py-3 text-center">
-            <label class="inline-flex items-center cursor-pointer select-none"
-                   x-data="{ on: {{ 'true' if tpl.enabled else 'false' }} }">
-              <input type="checkbox" class="sr-only toggle-enabled" :checked="on"
-                     @change="on = $event.target.checked; saveTpl('{{ uid }}', $event.target.closest('tr'), on)" />
-              <div class="relative w-11 h-6 rounded-full transition-colors duration-200 ease-in-out"
-                   :class="on ? 'bg-brand-600' : 'bg-slate-400 dark:bg-slate-600'">
-                <div class="absolute top-0.5 left-0.5 bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-200 ease-in-out"
-                     :class="on ? 'translate-x-5' : 'translate-x-0'"></div>
-              </div>
-            </label>
-          </td>
-          <td class="px-4 py-3">
-            <textarea class="input min-h-[64px] font-normal contact-msgs" rows="2"
-                      placeholder="留空则使用下方「通用模板」"
-                      onblur="saveTpl('{{ uid }}', this.closest('tr'))">{{ (tpl.messages or [])|join('\n') }}</textarea>
-            <div class="mt-1.5 flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <span class="shrink-0 mt-0.5">通用模板：</span>
-              <code class="flex-1 break-all default-preview text-slate-700 dark:text-slate-300"></code>
-              <button type="button" onclick="useDefault(this.closest('tr'))"
-                      class="shrink-0 text-brand-600 dark:text-brand-400 hover:underline">↑ 填入</button>
-            </div>
-          </td>
-          <td class="px-4 py-3 text-center">
-            <button @click="previewSend('{{ uid }}', '{{ c['nickname']|e }}')" class="btn-sec text-xs whitespace-nowrap">测试发送</button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  {% if q %}<a href="/accounts/{{ acc.id }}" class="btn-ghost text-sm">清除</a>{% endif %}
+  <div class="ml-auto text-sm text-ios-label3 whitespace-nowrap">
+    共 <span class="font-semibold text-ios-label dark:text-slate-100">{{ full_total }}</span> 人
   </div>
-
-  {% if total_pages > 1 %}
-  <div class="mt-4 flex items-center justify-center gap-2 text-sm">
-    {% set qs_base = '&q=' + q if q else '' %}
-    {% if page > 1 %}
-      <a href="?page={{ page - 1 }}{{ qs_base }}" class="btn-sec">← 上一页</a>
-    {% else %}
-      <span class="btn-sec opacity-40 cursor-not-allowed">← 上一页</span>
-    {% endif %}
-    <span class="px-4 py-2 text-slate-500">第 {{ page }} / {{ total_pages }} 页</span>
-    {% if page < total_pages %}
-      <a href="?page={{ page + 1 }}{{ qs_base }}" class="btn-sec">下一页 →</a>
-    {% else %}
-      <span class="btn-sec opacity-40 cursor-not-allowed">下一页 →</span>
-    {% endif %}
-  </div>
-  {% endif %}
-  {% else %}
-  <div class="card p-8 text-center text-slate-500">
-    {% if q %}没有匹配「{{ q }}」的联系人{% else %}暂无火花联系人{% endif %}
-  </div>
-  {% endif %}
 </div>
 
-<!-- 通用模板 Tab -->
-<div x-show="tab==='default'" x-cloak>
-  <div class="card p-6 max-w-2xl">
-    <h3 class="font-semibold mb-1">通用模板（兜底）</h3>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">联系人单独的消息列表为空时，会从这里随机选一条发送。修改后下方联系人的「将使用通用模板」提示会同步更新。</p>
-    <div class="space-y-4">
-      <label class="flex items-center gap-3">
-        <input type="checkbox" id="def-en" {% if default_tpl.enabled %}checked{% endif %} onchange="saveDefault()" class="w-5 h-5 accent-brand-600" />
-        <span class="text-sm font-medium">启用</span>
+{# 联系人卡 macro：按 Pencil 设计稿（R1 行 + 橙色 Panel 大天数 + R3 操作行） #}
+{% macro contact_card(c) %}
+  {% set uid = c['uid'] %}
+  {% set tpl = templates.get(uid, {"enabled": False, "messages": []}) %}
+  {% set name = c['nickname'] or uid %}
+  {% set days = c['days'] %}
+  {% set broken = (c['status'] != 'active') %}
+  <div data-uid="{{ uid }}"
+       data-name="{{ name|e }}"
+       data-days="{{ days }}"
+       data-avatar="{{ c.avatar or '' }}"
+       data-broken="{{ '1' if broken else '0' }}"
+       x-data="{ enabled: {{ 'true' if tpl.enabled else 'false' }} }"
+       x-show="filter==='all' || (filter==='active' && !{{ 'true' if broken else 'false' }}) || (filter==='broken' && {{ 'true' if broken else 'false' }})"
+       class="contact-card apple-card-solid p-4 transition hover:shadow-apple-lg flex flex-col gap-3 relative overflow-hidden{% if broken %} border-rose-200 dark:border-rose-800/60{% endif %}">
+
+    <!-- R1: 勾选 + 头像 + 名字 + iOS toggle -->
+    <div class="flex items-start gap-3">
+      <input type="checkbox" class="contact-select mt-1 w-4 h-4 accent-ios-tint cursor-pointer shrink-0"
+             value="{{ uid }}" onchange="updateSelectedCount()" title="选择" />
+      <div class="relative shrink-0 w-11 h-11">
+        <div class="avatar-fallback absolute inset-0 flex items-center justify-center rounded-full text-base font-semibold select-none
+                    {% if broken %}bg-ios-redBg text-ios-red{% else %}bg-ios-tintBg text-ios-tint{% endif %}">
+          {{ name[:1]|upper }}
+        </div>
+        {% if c.avatar %}
+        <img src="{{ c.avatar }}" alt="{{ name|e }}" loading="lazy" referrerpolicy="no-referrer"
+             class="relative w-11 h-11 rounded-full object-cover ring-1 ring-slate-200 dark:ring-slate-700"
+             onerror="this.remove()" />
+        {% endif %}
+      </div>
+      <div class="min-w-0 flex-1">
+        <button type="button"
+                onclick="openTplEdit(this.closest('[data-uid]'))"
+                class="font-semibold text-ios-label dark:text-slate-100 truncate text-left w-full hover:text-ios-tint transition"
+                title="点击编辑话术">{{ name }}</button>
+        <div class="text-xs text-ios-label3 truncate" title="{{ uid }}">{{ uid }}</div>
+      </div>
+      <label class="cursor-pointer shrink-0" title="启用自动续火花">
+        <input type="checkbox" class="sr-only toggle-enabled" :checked="enabled"
+               @change="enabled = $event.target.checked; saveTplEnabled('{{ uid }}', enabled)" />
+        <div class="ios-switch" :class="enabled ? 'ios-switch-on' : 'ios-switch-off'">
+          <div class="ios-switch-knob"></div>
+        </div>
       </label>
-      <div>
-        <label class="label">消息列表（每行一条，发送时随机选）</label>
-        <textarea id="def-msgs" class="input min-h-[120px] font-normal" onblur="saveDefault()">{{ (default_tpl.messages or [])|join('\n') }}</textarea>
+    </div>
+
+    <!-- Panel: 橙色火花大数字 + 三态徽章 -->
+    <div class="flex items-center justify-between px-3 py-2.5 rounded-xl
+                {% if broken %}bg-ios-redBg/60{% else %}bg-ios-tintBg/70{% endif %}">
+      <div class="flex items-center gap-1.5">
+        <iconify-icon icon="lucide:{{ 'flame-kindling' if broken else 'flame' }}" width="22" height="22"
+                      class="{% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}"></iconify-icon>
+        <span class="text-2xl font-extrabold leading-none {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}">{{ days }}</span>
+        <span class="text-xs font-medium {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}/80">天</span>
+      </div>
+      {% if broken %}
+        <span class="apple-chip-red">
+          <iconify-icon icon="lucide:flame-kindling" width="11" height="11"></iconify-icon>
+          需重燃
+        </span>
+      {% elif today_sent %}
+        <span class="apple-chip-green">
+          <iconify-icon icon="lucide:check" width="11" height="11"></iconify-icon>
+          今日已续
+        </span>
+      {% else %}
+        <span class="apple-chip-gray">
+          <iconify-icon icon="lucide:clock" width="11" height="11"></iconify-icon>
+          今日待续
+        </span>
+      {% endif %}
+    </div>
+
+    <!-- R3: 操作行 -->
+    <div class="flex items-center justify-between gap-2">
+      <button type="button" onclick="openTplEdit(this.closest('[data-uid]'))"
+              class="text-xs text-ios-blue hover:underline inline-flex items-center gap-1">
+        <iconify-icon icon="lucide:pencil" width="13" height="13"></iconify-icon>
+        编辑话术
+      </button>
+      <div class="flex items-center gap-2">
+        <button onclick="openShareCard(this.closest('[data-uid]'))" class="text-xs text-ios-tint hover:underline inline-flex items-center gap-1" title="生成分享卡">
+          <iconify-icon icon="lucide:share-2" width="13" height="13"></iconify-icon>
+          分享卡
+        </button>
+        <button @click="previewSend('{{ uid }}', '{{ name|e }}')" class="apple-btn-sec text-xs !px-3 !py-1.5">
+          <iconify-icon icon="lucide:send" width="13" height="13"></iconify-icon>
+          测试发送
+        </button>
       </div>
     </div>
   </div>
+{% endmacro %}
+
+<!-- 联系人 Grid -->
+{% if contacts %}
+<div class="flex items-center gap-2 mb-3 text-sm text-ios-label2">
+  <label class="inline-flex items-center gap-2 cursor-pointer">
+    <input type="checkbox" id="select-all" onchange="toggleAll(this)"
+           class="w-4 h-4 accent-ios-tint cursor-pointer" />
+    全选本页
+  </label>
+</div>
+<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+  {% for c in contacts %}{{ contact_card(c) }}{% endfor %}
 </div>
 
-<!-- 定时 Tab -->
-<div x-show="tab==='schedule'" x-cloak>
-  <div class="card p-6 max-w-2xl">
-    <h3 class="font-semibold mb-1">⏰ 定时续火花</h3>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">到点后后台按上方模板自动发送（仅在面板运行时生效）</p>
-    <div class="space-y-5">
-      <label class="flex items-center gap-3">
-        <input type="checkbox" id="sch-en" {% if schedule.enabled %}checked{% endif %} onchange="saveSchedule()" class="w-5 h-5 accent-brand-600" />
-        <span class="text-sm font-medium">启用每日定时</span>
-      </label>
+{% if total_pages > 1 %}
+<div class="mt-6 flex items-center justify-center gap-2 text-sm">
+  {% set qs_base = '&q=' + q if q else '' %}
+  {% if page > 1 %}
+    <a href="?page={{ page - 1 }}{{ qs_base }}" class="apple-btn-sec">← 上一页</a>
+  {% else %}
+    <span class="apple-btn-sec opacity-40 cursor-not-allowed">← 上一页</span>
+  {% endif %}
+  <span class="px-4 py-2 text-ios-label3">第 {{ page }} / {{ total_pages }} 页</span>
+  {% if page < total_pages %}
+    <a href="?page={{ page + 1 }}{{ qs_base }}" class="apple-btn-sec">下一页 →</a>
+  {% else %}
+    <span class="apple-btn-sec opacity-40 cursor-not-allowed">下一页 →</span>
+  {% endif %}
+</div>
+{% endif %}
+{% else %}
+<div class="apple-card-solid p-12 text-center text-ios-label3">
+  {% if q %}没有匹配「{{ q }}」的联系人{% else %}暂无火花联系人{% endif %}
+</div>
+{% endif %}
+
+<!-- 通用模板 + 定时（左右两栏，紧凑） -->
+<div class="grid lg:grid-cols-2 gap-4 mt-8">
+  <div class="apple-card-solid p-5">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-9 h-9 rounded-xl bg-ios-blueBg flex items-center justify-center">
+        <iconify-icon icon="lucide:message-square-text" width="18" height="18" class="text-ios-blue"></iconify-icon>
+      </div>
       <div>
-        <label class="label">发送时间</label>
-        <input type="time" id="sch-time" value="{{ schedule.time_hhmm }}" onchange="saveSchedule()" class="input max-w-[160px]" />
+        <h3 class="font-semibold text-ios-label dark:text-slate-100">通用模板（兜底）</h3>
+        <p class="text-xs text-ios-label3">单独未设置时随机选这里的一条发送</p>
+      </div>
+    </div>
+    <div class="space-y-3 mt-4"
+         x-data="{ on: {{ 'true' if default_tpl.enabled else 'false' }} }">
+      <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <span class="text-sm font-medium text-ios-label dark:text-slate-100">启用</span>
+        <input type="checkbox" id="def-en" {% if default_tpl.enabled %}checked{% endif %} class="sr-only"
+               @change="on=$event.target.checked; saveDefault()" />
+        <div class="ios-switch" :class="on ? 'ios-switch-on' : 'ios-switch-off'"
+             @click="document.getElementById('def-en').click()">
+          <div class="ios-switch-knob"></div>
+        </div>
+      </label>
+      <textarea id="def-msgs" class="input min-h-[100px] font-normal" onblur="saveDefault()"
+                placeholder="一行一条话术…">{{ (default_tpl.messages or [])|join('\n') }}</textarea>
+    </div>
+  </div>
+
+  <div class="apple-card-solid p-5">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-9 h-9 rounded-xl bg-ios-tintBg flex items-center justify-center">
+        <iconify-icon icon="lucide:alarm-clock" width="18" height="18" class="text-ios-tint"></iconify-icon>
+      </div>
+      <div>
+        <h3 class="font-semibold text-ios-label dark:text-slate-100">定时续火花</h3>
+        <p class="text-xs text-ios-label3">每天到点后台自动跑（需面板运行）</p>
+      </div>
+    </div>
+    <div class="space-y-3 mt-4"
+         x-data="{ on: {{ 'true' if schedule.enabled else 'false' }} }">
+      <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <span class="text-sm font-medium text-ios-label dark:text-slate-100">启用每日定时</span>
+        <input type="checkbox" id="sch-en" {% if schedule.enabled %}checked{% endif %} class="sr-only"
+               @change="on=$event.target.checked; saveSchedule()" />
+        <div class="ios-switch" :class="on ? 'ios-switch-on' : 'ios-switch-off'"
+             @click="document.getElementById('sch-en').click()">
+          <div class="ios-switch-knob"></div>
+        </div>
+      </label>
+      <div class="flex items-center gap-3">
+        <input type="time" id="sch-time" value="{{ schedule.time_hhmm }}" onchange="saveSchedule()"
+               class="input max-w-[150px] text-lg font-semibold" />
+        <div class="flex flex-wrap gap-1.5">
+          {% for preset in ['08:00','09:00','12:00','20:00'] %}
+          <button type="button" onclick="document.getElementById('sch-time').value='{{ preset }}'; saveSchedule()"
+                  class="px-2.5 py-1 rounded-lg border border-ios-sep bg-white dark:bg-slate-700 dark:border-slate-600 text-xs hover:border-ios-tint hover:text-ios-tint transition">{{ preset }}</button>
+          {% endfor %}
+        </div>
       </div>
       {% if schedule.last_ran_date %}
-      <div class="text-xs text-slate-500">
+      <div class="text-xs text-ios-label3 pt-1">
         最后触发：{{ schedule.last_ran_date }}
         {% if schedule.last_result %}· {{ schedule.last_result }}{% endif %}
       </div>
@@ -212,128 +365,261 @@
   </div>
 </div>
 
-<!-- 日志 Tab -->
-<div x-show="tab==='logs'" x-cloak>
-  <div class="card p-4">
-    <a href="/accounts/{{ acc.id }}/logs" class="btn-sec text-sm">查看完整日志</a>
-    <div class="mt-4 text-xs font-mono text-slate-500 dark:text-slate-400">今日日志会在这里显示（简化版，完整版请点上方按钮）</div>
-  </div>
-</div>
-
-<!-- 立即续火花 确认 Modal -->
-<dialog x-ref="runAutoDialog"
-        x-effect="runAutoConfirm ? (!$refs.runAutoDialog.open && $refs.runAutoDialog.showModal()) : ($refs.runAutoDialog.open && $refs.runAutoDialog.close())"
-        @close="runAutoConfirm=false"
-        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full max-w-md">
+<!-- 立即续火花 确认 -->
+{% call apple_modal('runAutoDialog', 'runAutoConfirm', size='sm', title=None) %}
   <div class="p-6">
-    <h3 class="font-semibold text-lg mb-2">🔥 立即给所有联系人续火花</h3>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">
-      将给所有启用的联系人按模板发一条消息（间隔 5s）。如果部分联系人没单独配置消息，会使用「通用模板」。
-    </p>
-    <div class="flex justify-end gap-2">
-      <button type="button" @click="runAutoConfirm=false" class="btn-sec">取消</button>
-      <button type="button" @click="runAutoConfirm=false; runAuto()" class="btn-primary">确认执行</button>
+    <div class="flex flex-col items-center text-center">
+      <div class="w-14 h-14 rounded-full bg-ios-tintBg flex items-center justify-center mb-3">
+        <iconify-icon icon="lucide:flame" width="28" height="28" class="text-ios-tint"></iconify-icon>
+      </div>
+      <h3 class="text-lg font-bold text-ios-label dark:text-slate-100">立即给所有联系人续火花？</h3>
+      <p class="text-sm text-ios-label2 mt-2 leading-relaxed">
+        将给所有已启用的联系人按模板各发一条（间隔 5 秒），未单独配置消息的使用通用模板。
+      </p>
+    </div>
+    <div class="grid grid-cols-2 gap-2 mt-6">
+      <button type="button" @click="runAutoConfirm=false" class="apple-btn-sec">取消</button>
+      <button type="button" @click="runAutoConfirm=false; runAuto()" class="apple-btn-tint">确认执行</button>
     </div>
   </div>
-</dialog>
+{% endcall %}
 
-<!-- 发送 Modal（原生 dialog：native focus trap + ESC close + backdrop 点击不关闭）-->
-<dialog x-ref="sendDialog"
-        x-effect="sendModal.open ? (!$refs.sendDialog.open && $refs.sendDialog.showModal()) : ($refs.sendDialog.open && $refs.sendDialog.close())"
-        @close="sendModal.open=false; sendModal.sending=false"
-        class="rounded-xl p-0 backdrop:bg-black/50 bg-white dark:bg-slate-800 w-full max-w-lg">
-  <div class="p-6">
-    <h3 class="font-semibold text-lg mb-1" x-text="sendModal.targets.length===1 ? '测试发送 · '+sendModal.targets[0].name : '批量发送 · '+sendModal.targets.length+' 人'"></h3>
-    <p class="text-xs text-slate-500 mb-4" x-show="sendModal.targets.length>1"
-       x-text="sendModal.targets.map(t=>t.name).join('、')"></p>
-    <textarea x-model="sendModal.text" class="input min-h-[100px] font-normal"
-              placeholder="要发送的消息内容..."></textarea>
-    <div x-show="sendModal.status" x-cloak class="mt-3 text-sm" x-text="sendModal.status"></div>
-    <div x-show="sendModal.results.length" x-cloak class="mt-3 max-h-48 overflow-y-auto text-xs space-y-1">
+<!-- 模板编辑 Modal -->
+{% call apple_modal('tplDialog', 'tplModal.open', size='md',
+                    title='编辑续火花话术', subtitle='留空则使用「通用模板」') %}
+  <div class="p-5 space-y-4">
+    <!-- 联系人头部 -->
+    <div class="flex items-center gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+      <template x-if="tplModal.avatar">
+        <img :src="tplModal.avatar" referrerpolicy="no-referrer"
+             class="w-11 h-11 rounded-full object-cover ring-1 ring-slate-200" />
+      </template>
+      <template x-if="!tplModal.avatar">
+        <div class="w-11 h-11 rounded-full bg-ios-tintBg flex items-center justify-center text-base font-semibold text-ios-tint"
+             x-text="(tplModal.name||'?')[0]"></div>
+      </template>
+      <div class="min-w-0 flex-1">
+        <div class="font-semibold text-ios-label dark:text-slate-100 truncate" x-text="tplModal.name"></div>
+        <div class="flex items-center gap-1.5 mt-0.5">
+          <span class="apple-chip-tint">
+            <iconify-icon icon="lucide:flame" width="11" height="11"></iconify-icon>
+            <span x-text="tplModal.days+'天'"></span>
+          </span>
+        </div>
+      </div>
+    </div>
+    <!-- 启用 -->
+    <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+      <div>
+        <div class="text-sm font-medium text-ios-label dark:text-slate-100">自动续火花</div>
+        <div class="text-xs text-ios-label3">定时/立即续火花时给该好友发送</div>
+      </div>
+      <div class="ios-switch" :class="tplModal.enabled ? 'ios-switch-on' : 'ios-switch-off'"
+           @click="tplModal.enabled = !tplModal.enabled">
+        <div class="ios-switch-knob"></div>
+      </div>
+    </label>
+    <!-- 话术列表 -->
+    <div>
+      <div class="flex items-center justify-between mb-1.5">
+        <label class="text-sm font-semibold text-ios-label2">话术列表</label>
+        <span class="text-xs text-ios-label3" x-text="tplModal.messages.length+' 条 · 随机轮发'"></span>
+      </div>
+      <div class="space-y-2">
+        <template x-for="(m, i) in tplModal.messages" :key="i">
+          <div class="flex items-center gap-2 p-2.5 rounded-xl border border-ios-sep dark:border-slate-700 bg-white dark:bg-slate-800/60">
+            <iconify-icon icon="lucide:grip-vertical" width="15" height="15" class="text-ios-label3 shrink-0"></iconify-icon>
+            <input type="text" x-model="tplModal.messages[i]" class="flex-1 bg-transparent text-sm text-ios-label dark:text-slate-100 focus:outline-none" />
+            <button type="button" @click="tplModal.messages.splice(i,1)"
+                    class="shrink-0 text-ios-label3 hover:text-ios-red">
+              <iconify-icon icon="lucide:trash-2" width="14" height="14"></iconify-icon>
+            </button>
+          </div>
+        </template>
+      </div>
+      <button type="button" @click="tplModal.messages.push('')"
+              class="w-full mt-2 py-2.5 rounded-xl border border-dashed border-ios-sepStrong text-sm font-medium text-ios-tint hover:bg-ios-tintBg/40 transition inline-flex items-center justify-center gap-1.5">
+        <iconify-icon icon="lucide:plus" width="15" height="15"></iconify-icon>
+        添加话术
+      </button>
+    </div>
+    <!-- 通用预览 -->
+    <div class="text-xs text-ios-label3 flex items-start gap-2 px-1">
+      <span class="shrink-0 mt-0.5">通用：</span>
+      <code class="flex-1 break-all default-preview text-slate-700 dark:text-slate-300 font-normal"></code>
+      <button type="button" @click="tplModal.messages = DEFAULT_MSGS.slice()"
+              class="shrink-0 text-ios-blue hover:underline">↑ 填入</button>
+    </div>
+  </div>
+  <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+    <button type="button" @click="tplModal.open=false" class="apple-btn-sec">取消</button>
+    <button type="button" @click="saveTplFromModal()" class="apple-btn-tint">
+      <iconify-icon icon="lucide:save" width="15" height="15"></iconify-icon>
+      保存话术
+    </button>
+  </div>
+{% endcall %}
+
+<!-- 发送 Modal -->
+{% call apple_modal('sendDialog', 'sendModal.open', size='lg',
+                    title='发送消息', subtitle='预览并发送测试 / 批量消息') %}
+  <div class="p-5 space-y-4">
+    <div class="flex items-center gap-2 text-sm">
+      <iconify-icon icon="lucide:users" width="15" height="15" class="text-ios-label2"></iconify-icon>
+      <span x-text="sendModal.targets.length===1 ? sendModal.targets[0].name : sendModal.targets.length+' 位好友'"
+            class="font-medium text-ios-label dark:text-slate-100"></span>
+      <span x-show="sendModal.targets.length>1" class="text-xs text-ios-label3 truncate"
+            x-text="'· '+sendModal.targets.map(t=>t.name).join('、')"></span>
+    </div>
+    <div>
+      <label class="label">消息内容</label>
+      <textarea x-model="sendModal.text" class="input min-h-[100px] font-normal"
+                placeholder="要发送的消息内容…"></textarea>
+    </div>
+    <div x-show="sendModal.text.trim()" x-cloak>
+      <div class="text-xs text-ios-label3 mb-1.5">预览</div>
+      <div class="bg-ios-fill2 dark:bg-slate-700/40 rounded-xl p-3 flex justify-end">
+        <div class="bg-ios-tint text-white rounded-2xl px-3.5 py-2 max-w-[80%] text-sm" x-text="sendModal.text"></div>
+      </div>
+    </div>
+    <div x-show="sendModal.status" x-cloak class="text-sm" x-text="sendModal.status"></div>
+    <div x-show="sendModal.results.length" x-cloak class="max-h-48 overflow-y-auto text-xs space-y-1.5 border-t border-slate-100 dark:border-slate-700 pt-3">
       <template x-for="r in sendModal.results" :key="r.uid">
-        <div :class="r.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
-          <span x-text="(r.ok?'✓ ':'✗ ') + (r.nickname||r.uid) + '：' + (r.detail||'')"></span>
+        <div :class="r.ok ? 'text-ios-green' : 'text-ios-red'" class="flex items-start gap-1.5">
+          <iconify-icon :icon="r.ok ? 'lucide:check' : 'lucide:x'" width="13" height="13" class="mt-0.5 shrink-0"></iconify-icon>
+          <span x-text="(r.nickname||r.uid) + ' · ' + (r.detail||'')"></span>
         </div>
       </template>
     </div>
-    <div class="mt-4 flex justify-end gap-2">
-      <button type="button" @click="sendModal.open=false" class="btn-sec" :disabled="sendModal.sending">取消</button>
-      <button type="button" @click="doSend()" class="btn-primary" :disabled="sendModal.sending || !sendModal.text.trim()">
-        <span x-show="!sendModal.sending">发送</span>
-        <span x-show="sendModal.sending">发送中...</span>
-      </button>
+  </div>
+  <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+    <button type="button" @click="sendModal.open=false" class="apple-btn-sec" :disabled="sendModal.sending">取消</button>
+    <button type="button" @click="doSend()" class="apple-btn-tint" :disabled="sendModal.sending || !sendModal.text.trim()">
+      <iconify-icon icon="lucide:send" width="15" height="15"></iconify-icon>
+      <span x-show="!sendModal.sending">发送</span>
+      <span x-show="sendModal.sending">发送中…</span>
+    </button>
+  </div>
+{% endcall %}
+
+<!-- 分享卡 Modal -->
+{% call apple_modal('shareDialog', 'shareModal.open', size='md', title='分享火花卡', subtitle='保存或复制图片，发到朋友圈/抖音') %}
+  <div class="p-5 flex flex-col items-center">
+    <div id="share-card" class="w-[300px] bg-white rounded-3xl overflow-hidden shadow-apple-lg ring-1 ring-slate-200">
+      <div class="px-5 pt-5 pb-7 relative" style="background:#FFF7ED;">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-1.5">
+            <iconify-icon icon="lucide:flame" width="15" height="15" style="color:#FF9500"></iconify-icon>
+            <span class="text-xs font-semibold" style="color:#C2410C">抖音续火花</span>
+          </div>
+          <div class="text-[11px] font-mono" style="color:#C2410C" x-text="shareModal.date"></div>
+        </div>
+        <div class="flex justify-center mt-5 relative">
+          <div class="relative w-[108px] h-[108px] rounded-full bg-white p-[3px]"
+               style="box-shadow:0 6px 18px -4px rgba(249,115,22,0.4);">
+            <div class="w-full h-full rounded-full overflow-hidden ring-[3px] ring-[#FF9500]/90 bg-slate-100 flex items-center justify-center">
+              <template x-if="shareModal.avatar">
+                <img :src="shareModal.avatar" crossorigin="anonymous" referrerpolicy="no-referrer"
+                     class="w-full h-full object-cover" @error="shareModal.avatar=''" />
+              </template>
+              <template x-if="!shareModal.avatar">
+                <span class="text-4xl font-bold" style="color:#FF9500" x-text="(shareModal.name||'?')[0]"></span>
+              </template>
+            </div>
+            <div class="absolute -bottom-1 right-0 px-2.5 py-1 rounded-full text-[11px] font-semibold text-white flex items-center gap-1"
+                 style="background:#FF9500; box-shadow:0 2px 6px rgba(249,115,22,0.6);">
+              <iconify-icon icon="lucide:flame" width="11" height="11" style="color:#fff"></iconify-icon>
+              在续
+            </div>
+          </div>
+        </div>
+        <div class="text-center mt-4 text-lg font-bold" style="color:#1C1C1E" x-text="shareModal.name"></div>
+        <div class="flex items-end justify-center gap-1.5 mt-1">
+          <span class="text-[64px] leading-none font-extrabold" style="color:#FF9500" x-text="shareModal.days"></span>
+          <span class="text-base font-semibold pb-3" style="color:#6E6E73">天</span>
+        </div>
+        <div class="text-center mt-1 text-xs" style="color:#6E6E73">
+          我们的火花已连续燃烧 <span x-text="shareModal.days"></span> 天
+        </div>
+      </div>
+      <!-- 起始日 / 连续天数 双列 -->
+      <div class="grid grid-cols-2 divide-x divide-slate-200 px-5 py-3 border-t border-slate-200">
+        <div class="flex flex-col items-center">
+          <div class="text-[10px]" style="color:#AEAEB2">起始日</div>
+          <div class="mt-1 font-mono text-sm font-semibold" style="color:#1C1C1E" x-text="shareModal.startDate"></div>
+        </div>
+        <div class="flex flex-col items-center">
+          <div class="text-[10px]" style="color:#AEAEB2">连续</div>
+          <div class="mt-1 font-mono text-sm font-semibold" style="color:#FF9500"><span x-text="shareModal.days"></span> 天</div>
+        </div>
+      </div>
+      <div class="flex items-center justify-between px-5 py-3 border-t border-slate-200">
+        <div>
+          <div class="text-xs font-semibold" style="color:#1C1C1E">扫码也来续火花</div>
+          <div class="text-[10px]" style="color:#AEAEB2">和好友一起守护每天的火花</div>
+        </div>
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:#E9E9EB">
+          <iconify-icon icon="lucide:qr-code" width="26" height="26" style="color:#6E6E73"></iconify-icon>
+        </div>
+      </div>
+    </div>
+    <div x-show="shareModal.busy" x-cloak class="mt-3 text-xs text-ios-label3 flex items-center gap-1.5">
+      <iconify-icon icon="lucide:loader-2" width="14" height="14" class="animate-spin"></iconify-icon>
+      正在生成图片…
     </div>
   </div>
-</dialog>
+  <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+    <button type="button" @click="shareModal.open=false" class="apple-btn-sec">关闭</button>
+    <button type="button" @click="copyShareImage()" class="apple-btn-sec" :disabled="shareModal.busy">
+      <iconify-icon icon="lucide:clipboard" width="15" height="15"></iconify-icon>
+      复制图片
+    </button>
+    <button type="button" @click="downloadShareImage()" class="apple-btn-tint" :disabled="shareModal.busy">
+      <iconify-icon icon="lucide:download" width="15" height="15"></iconify-icon>
+      保存到本地
+    </button>
+  </div>
+{% endcall %}
 
 </div>
 
 <script>
 function accountPage() {
   return {
-    tab: 'contacts',
+    filter: 'all',
     running: false,
     batchRunning: false,
     checking: false,
     runAutoConfirm: false,
     selectedCount: 0,
-    sendModal: {
-      open: false, sending: false, text: '', status: '',
-      targets: [],   // [{uid, name}]
-      results: [],   // [{uid, nickname, ok, detail}]
-    },
-    init() {
-      // 暴露 x-data 实例，供普通 function 回写 selectedCount / 打开 modal
-      window._accountPage = this;
-    },
+    sendModal: { open:false, sending:false, text:'', status:'', targets:[], results:[] },
+    shareModal: { open:false, busy:false, name:'', days:0, avatar:'', date:'', startDate:'' },
+    tplModal:   { open:false, uid:'', name:'', days:0, avatar:'', enabled:false, messages:[] },
+    init() { window._accountPage = this; },
     openSend(targets) {
-      this.sendModal.open = true;
-      this.sendModal.sending = false;
-      this.sendModal.text = '';
-      this.sendModal.status = '';
-      this.sendModal.results = [];
-      this.sendModal.targets = targets;
+      Object.assign(this.sendModal, {open:true, sending:false, text:'', status:'', results:[], targets});
     },
     async doSend() {
       const text = this.sendModal.text.trim();
       if (!text) return;
       this.sendModal.sending = true;
-      this.sendModal.status = '发送中...';
+      this.sendModal.status = '发送中…';
       this.sendModal.results = [];
       try {
         if (this.sendModal.targets.length === 1) {
           const t = this.sendModal.targets[0];
-          const r = await api('/api/send', 'POST',
-            {account_id: {{ acc.id }}, uid: t.uid, text});
-          this.sendModal.results = [{uid: t.uid, nickname: t.name,
-                                     ok: r.ok, detail: r.detail || r.error || ''}];
-          this.sendModal.status = r.ok
-            ? '✓ 已送达（' + (r.detail || '服务端 OK') + '）'
-            : '✗ ' + (r.detail || r.error || '失败');
+          const r = await api('/api/send', 'POST', {account_id: {{ acc.id }}, uid: t.uid, text});
+          this.sendModal.results = [{uid: t.uid, nickname: t.name, ok: r.ok, detail: r.detail || r.error || ''}];
+          this.sendModal.status = r.ok ? '✓ 已送达（' + (r.detail || '服务端 OK') + '）' : '✗ ' + (r.detail || r.error || '失败');
         } else {
           const uids = this.sendModal.targets.map(t => t.uid);
-          const r = await api('/api/send-batch', 'POST',
-            {account_id: {{ acc.id }}, uids, text});
-          if (!r.ok) {
-            this.sendModal.status = '✗ ' + (r.error || '失败');
-          } else {
-            this.sendModal.results = r.results || [];
-            this.sendModal.status = `完成：送达 ${r.sent}，失败 ${r.failed}`;
-          }
+          const r = await api('/api/send-batch', 'POST', {account_id: {{ acc.id }}, uids, text});
+          if (!r.ok) this.sendModal.status = '✗ ' + (r.error || '失败');
+          else { this.sendModal.results = r.results || []; this.sendModal.status = `完成：送达 ${r.sent}，失败 ${r.failed}`; }
         }
-      } catch (e) {
-        this.sendModal.status = '✗ 前端异常: ' + (e && e.message || e);
-        console.error('[doSend]', e);
-      } finally {
-        this.sendModal.sending = false;
-      }
+      } catch (e) { this.sendModal.status = '✗ 前端异常: ' + (e && e.message || e); }
+      finally { this.sendModal.sending = false; }
     },
-    tabs: [
-      {key:'contacts', label:'联系人'},
-      {key:'default',  label:'通用模板'},
-      {key:'schedule', label:'定时'},
-      {key:'logs',     label:'日志'},
-    ],
     async runAuto() {
       this.running = true;
       try {
@@ -344,33 +630,118 @@ function accountPage() {
     },
     async refreshContacts() {
       const r = await api('/api/refresh', 'POST', {account_id: {{ acc.id }}});
-      if (r.ok) { toast('刷新成功，正在重载...'); setTimeout(()=>location.reload(), 600); }
+      if (r.ok) { toast('刷新成功，正在重载…'); setTimeout(()=>location.reload(), 600); }
       else toast(r.error || '失败', 'err');
     },
     async checkCookies() {
       this.checking = true;
       try {
         const r = await api('/api/cookies-check', 'POST', {account_id: {{ acc.id }}});
-        if (r.status === 'ok') {
-          toast('✓ 登录态正常');
-        } else if (r.status === 'expired') {
+        if (r.status === 'ok') toast('✓ 登录态正常');
+        else if (r.status === 'expired') {
           toast('✗ 登录态已失效，请重新扫码', 'err');
           setTimeout(()=>location.href='/accounts/{{ acc.id }}/login', 1500);
-        } else {
-          toast('⚠️ 体检返回: ' + r.status, 'err');
-        }
+        } else toast('⚠️ 体检返回: ' + r.status, 'err');
       } finally { this.checking = false; }
     },
     batchSend() {
       const boxes = document.querySelectorAll('.contact-select:checked');
       if (!boxes.length) { toast('请先勾选联系人', 'err'); return; }
       const targets = Array.from(boxes).map(x => ({
-        uid: x.value,
-        name: x.closest('tr').querySelector('.font-medium')?.textContent?.trim() || x.value,
+        uid: x.value, name: x.closest('[data-uid]').dataset.name || x.value,
       }));
       this.openSend(targets);
     },
+    previewSend(uid, name) { this.openSend([{uid, name}]); },
+    // —— 模板编辑弹窗 ——
+    openTplEdit({uid, name, days, avatar, messages, enabled}) {
+      this.tplModal = { open:true, uid, name, days, avatar, enabled, messages: messages.slice() };
+    },
+    async saveTplFromModal() {
+      const msgs = this.tplModal.messages.map(s => (s||'').trim()).filter(Boolean);
+      const r = await api('/api/template/{{ acc.id }}/' + encodeURIComponent(this.tplModal.uid),
+                          'PUT', {enabled: this.tplModal.enabled, messages: msgs});
+      if (r.ok) {
+        toast('已保存');
+        TPL_CACHE[this.tplModal.uid] = {enabled: this.tplModal.enabled, messages: msgs};
+        this.tplModal.open = false;
+      } else toast(r.error || '失败', 'err');
+    },
+    // —— 分享卡 ——
+    openShare({name, days, avatar}) {
+      const d = new Date();
+      const pad = n => String(n).padStart(2,'0');
+      const fmt = dt => `${String(dt.getFullYear()).slice(2)}.${pad(dt.getMonth()+1)}.${pad(dt.getDate())}`;
+      // 起始日 = 今天 - days
+      const start = new Date(d.getTime() - (days || 0) * 86400000);
+      this.shareModal = {
+        open: true, busy: false, name, days, avatar: avatar || '',
+        date: `${d.getFullYear()}.${pad(d.getMonth()+1)}.${pad(d.getDate())}`,
+        startDate: fmt(start),
+      };
+    },
+    async _renderImage() {
+      this.shareModal.busy = true;
+      try {
+        const canvas = await html2canvas(document.getElementById('share-card'), {
+          backgroundColor: null, scale: 2, useCORS: true, allowTaint: false, logging: false
+        });
+        return canvas;
+      } finally { this.shareModal.busy = false; }
+    },
+    async downloadShareImage() {
+      try {
+        const canvas = await this._renderImage();
+        const a = document.createElement('a');
+        a.download = `火花-${this.shareModal.name}-${this.shareModal.days}天.png`;
+        a.href = canvas.toDataURL('image/png');
+        a.click();
+        toast('已保存到下载文件夹');
+      } catch (e) { toast('生成失败：' + (e.message||e), 'err'); }
+    },
+    async copyShareImage() {
+      try {
+        const canvas = await this._renderImage();
+        canvas.toBlob(async blob => {
+          try {
+            await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+            toast('图片已复制到剪贴板');
+          } catch { toast('剪贴板不可用，请用「保存到本地」', 'err'); }
+        });
+      } catch (e) { toast('生成失败：' + (e.message||e), 'err'); }
+    },
   };
+}
+
+// 全局模板缓存（从后端注入，编辑后实时刷新）
+window.TPL_CACHE = {{ templates|tojson }};
+let DEFAULT_MSGS = {{ (default_tpl.messages or [])|tojson }};
+function renderDefaultPreviews() {
+  const text = DEFAULT_MSGS.length ? DEFAULT_MSGS.join('  /  ') : '（通用模板未设置，留空时不会发送）';
+  document.querySelectorAll('.default-preview').forEach(el => { el.textContent = text; });
+}
+document.addEventListener('DOMContentLoaded', renderDefaultPreviews);
+
+function openTplEdit(card) {
+  if (!window._accountPage) return;
+  const uid = card.dataset.uid;
+  const tpl = TPL_CACHE[uid] || {enabled:false, messages:[]};
+  window._accountPage.openTplEdit({
+    uid, name: card.dataset.name,
+    days: parseInt(card.dataset.days||'0', 10),
+    avatar: card.dataset.avatar || '',
+    enabled: !!tpl.enabled,
+    messages: (tpl.messages || []).slice(),
+  });
+}
+
+function openShareCard(card) {
+  if (!window._accountPage) return;
+  window._accountPage.openShare({
+    name: card.dataset.name,
+    days: parseInt(card.dataset.days||'0', 10),
+    avatar: card.dataset.avatar || '',
+  });
 }
 
 function toggleAll(el) {
@@ -382,39 +753,18 @@ function updateSelectedCount() {
   if (window._accountPage) window._accountPage.selectedCount = n;
 }
 
-// 当前通用模板内容（页面加载时由后端注入；编辑后由 saveDefault 同步到前端缓存）
-let DEFAULT_MSGS = {{ (default_tpl.messages or [])|tojson }};
-
-function renderDefaultPreviews() {
-  const text = DEFAULT_MSGS.length
-    ? DEFAULT_MSGS.join('  /  ')
-    : '（通用模板未设置，留空时不会发送）';
-  document.querySelectorAll('.default-preview').forEach(el => { el.textContent = text; });
-}
-document.addEventListener('DOMContentLoaded', renderDefaultPreviews);
-
-function useDefault(tr) {
-  const ta = tr.querySelector('textarea.contact-msgs');
-  ta.value = DEFAULT_MSGS.join('\n');
-  saveTpl(tr.dataset.uid, tr);
-}
-
-async function saveTpl(uid, tr, enabledOverride) {
-  const en = (typeof enabledOverride === 'boolean')
-    ? enabledOverride
-    : tr.querySelector('input.toggle-enabled').checked;
-  const msgs = tr.querySelector('textarea.contact-msgs').value.split('\n').map(s=>s.trim()).filter(Boolean);
-  const r = await api('/api/template/{{ acc.id }}/' + encodeURIComponent(uid), 'PUT', {enabled: en, messages: msgs});
-  toast(r.ok ? '已保存' : (r.error || '失败'), r.ok ? 'ok' : 'err');
+async function saveTplEnabled(uid, enabled) {
+  const cur = TPL_CACHE[uid] || {enabled:false, messages:[]};
+  const r = await api('/api/template/{{ acc.id }}/' + encodeURIComponent(uid), 'PUT',
+                      {enabled, messages: cur.messages || []});
+  if (r.ok) { TPL_CACHE[uid] = {enabled, messages: cur.messages || []}; toast('已保存'); }
+  else toast(r.error || '失败', 'err');
 }
 async function saveDefault() {
   const en = document.getElementById('def-en').checked;
   const msgs = document.getElementById('def-msgs').value.split('\n').map(s=>s.trim()).filter(Boolean);
   const r = await api('/api/template/{{ acc.id }}/default', 'PUT', {enabled: en, messages: msgs});
-  if (r.ok) {
-    DEFAULT_MSGS = msgs;
-    renderDefaultPreviews();
-  }
+  if (r.ok) { DEFAULT_MSGS = msgs; renderDefaultPreviews(); }
   toast(r.ok ? '通用模板已保存' : r.error, r.ok ? 'ok' : 'err');
 }
 async function saveSchedule() {
@@ -422,13 +772,6 @@ async function saveSchedule() {
   const time = document.getElementById('sch-time').value;
   const r = await api('/api/schedule/{{ acc.id }}', 'PUT', {enabled, time});
   toast(r.ok ? '定时已保存' : r.error, r.ok ? 'ok' : 'err');
-}
-function previewSend(uid, name) {
-  if (window._accountPage) {
-    window._accountPage.openSend([{uid, name}]);
-  } else {
-    toast('页面未就绪，请刷新', 'err');
-  }
 }
 </script>
 {% endblock %}

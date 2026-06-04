@@ -55,6 +55,7 @@ class DouyinAccount(Base):
 
     dy_uid:        Mapped[str | None] = mapped_column(String(32), nullable=True)
     nickname:      Mapped[str | None] = mapped_column(String(80), nullable=True)
+    avatar:        Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     status:        Mapped[str]     = mapped_column(String(24), default="pending_login")
     # 'pending_login' | 'active' | 'cookies_expired' | 'login_failed'

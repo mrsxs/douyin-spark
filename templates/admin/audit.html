@@ -1,54 +1,58 @@
-{% extends "base.html" %}
-{% block title %}审计日志 · 管理后台{% endblock %}
-{% block content %}
-<div class="mb-6">
-  <div class="text-sm text-slate-500"><a href="/admin" class="hover:underline">← 管理后台</a></div>
-  <h1 class="text-2xl font-bold mt-1">审计日志</h1>
-</div>
+{% extends "admin/_layout.html" %}
+{% set active_nav = "audit" %}
+{% block page_title %}审计日志{% endblock %}
+{% block page_subtitle %}系统所有关键操作记录 · 共 {{ total }} 条{% endblock %}
 
-<div class="card p-4 mb-4">
-  <form method="get" class="flex gap-2">
-    <input name="action" value="{{ action }}" placeholder="按 action 过滤（如 login）" class="input" />
-    <button class="btn-primary">筛选</button>
-  </form>
-</div>
+{% block admin_content %}
+<form method="get" class="flex items-center gap-3 mb-4">
+  <div class="relative flex-1 max-w-md">
+    <iconify-icon icon="lucide:search" width="16" height="16"
+      class="absolute left-3 top-1/2 -translate-y-1/2 text-ios-label3 pointer-events-none"></iconify-icon>
+    <input name="action" value="{{ action }}" placeholder="按 action 过滤（如 login）"
+           class="input !pl-9 !rounded-xl !bg-ios-fill2 !border-transparent" />
+  </div>
+  <button class="apple-btn-sec">
+    <iconify-icon icon="lucide:list-filter" width="15" height="15"></iconify-icon>
+    筛选
+  </button>
+</form>
 
-<div class="card overflow-hidden">
+<div class="apple-card-solid overflow-hidden">
   <table class="w-full text-sm">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+    <thead class="bg-ios-fill2 dark:bg-slate-700/30 text-xs text-ios-label3 font-medium">
       <tr>
-        <th class="px-4 py-3 text-left">时间</th>
-        <th class="px-4 py-3 text-left">操作者</th>
-        <th class="px-4 py-3 text-left">动作</th>
-        <th class="px-4 py-3 text-left">对象</th>
-        <th class="px-4 py-3 text-left">详情</th>
-        <th class="px-4 py-3 text-left">IP</th>
+        <th class="px-5 py-3 text-left">时间</th>
+        <th class="px-5 py-3 text-left">操作者</th>
+        <th class="px-5 py-3 text-left">动作</th>
+        <th class="px-5 py-3 text-left">对象</th>
+        <th class="px-5 py-3 text-left">详情</th>
+        <th class="px-5 py-3 text-left">IP</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
       {% for l in logs %}
-      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-        <td class="px-4 py-3 text-xs text-slate-500">{{ l.ts.strftime("%Y-%m-%d %H:%M:%S") }}</td>
-        <td class="px-4 py-3 text-sm">
-          <span class="pill pill-slate">{{ l.actor_kind }}</span>
-          {% if l.actor_user_id %}<span class="text-slate-500 ml-1">#{{ l.actor_user_id }}</span>{% endif %}
+      <tr class="hover:bg-ios-fill2/50 dark:hover:bg-slate-700/20">
+        <td class="px-5 py-3 text-xs text-ios-label3 font-mono">{{ l.ts.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        <td class="px-5 py-3 text-sm">
+          <span class="apple-chip-gray">{{ l.actor_kind }}</span>
+          {% if l.actor_user_id %}<span class="text-ios-label3 ml-1">#{{ l.actor_user_id }}</span>{% endif %}
         </td>
-        <td class="px-4 py-3"><span class="pill pill-indigo">{{ l.action }}</span></td>
-        <td class="px-4 py-3 text-sm text-slate-500">{{ l.target_type or "-" }}{% if l.target_id %} #{{ l.target_id }}{% endif %}</td>
-        <td class="px-4 py-3 text-xs text-slate-500 font-mono max-w-md truncate">{{ l.meta or "" }}</td>
-        <td class="px-4 py-3 text-xs text-slate-500 font-mono">{{ l.ip or "" }}</td>
+        <td class="px-5 py-3"><span class="apple-chip-blue">{{ l.action }}</span></td>
+        <td class="px-5 py-3 text-sm text-ios-label2">{{ l.target_type or "—" }}{% if l.target_id %} #{{ l.target_id }}{% endif %}</td>
+        <td class="px-5 py-3 text-xs text-ios-label3 font-mono max-w-md truncate" title="{{ l.meta or '' }}">{{ l.meta or "" }}</td>
+        <td class="px-5 py-3 text-xs text-ios-label3 font-mono">{{ l.ip or "" }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="px-4 py-8 text-center text-slate-500">暂无日志</td></tr>
+      <tr><td colspan="6" class="px-5 py-12 text-center text-ios-label3">暂无日志</td></tr>
       {% endfor %}
     </tbody>
   </table>
   {% if total > per_page %}
-  <div class="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
-    <div class="text-slate-500">共 {{ total }} 条</div>
+  <div class="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
+    <div class="text-ios-label3">第 {{ page }} 页 · 共 {{ total }} 条</div>
     <div class="flex gap-2">
-      {% if page > 1 %}<a href="?action={{ action }}&page={{ page - 1 }}" class="btn-sec text-xs">上一页</a>{% endif %}
-      {% if page * per_page < total %}<a href="?action={{ action }}&page={{ page + 1 }}" class="btn-sec text-xs">下一页</a>{% endif %}
+      {% if page > 1 %}<a href="?action={{ action }}&page={{ page - 1 }}" class="apple-btn-sec text-xs">← 上一页</a>{% endif %}
+      {% if page * per_page < total %}<a href="?action={{ action }}&page={{ page + 1 }}" class="apple-btn-sec text-xs">下一页 →</a>{% endif %}
     </div>
   </div>
   {% endif %}

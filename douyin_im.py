@@ -1443,6 +1443,40 @@ def _parse_conv_info(data: bytes, conv_id: str) -> tuple[int, str]:
         return 0, ""
 
 
+# ── self uid 识别（独立 helper，复用 parse_fire_streaks 的高频识别思路）─
+
+def extract_my_uid(resp_bytes: bytes) -> str:
+    """从 init 响应字节里识别当前账户的 UID（高频出现的就是自己）。
+
+    Why: 抖音 web 接口没有"我是谁"端点，要从 IM init 抓到的 conv_id 列表
+    （格式 0:1:uid_a:uid_b）按 UID 频次反推 — 出现最多的就是 self。
+    """
+    conv_positions = [
+        m.group().decode()
+        for m in re.finditer(rb'0:[12]:\d+:\d+', resp_bytes)
+    ]
+    ctr: Counter = Counter()
+    for cid in conv_positions:
+        parts = cid.split(":")
+        if len(parts) == 4:
+            ctr[parts[2]] += 1
+            ctr[parts[3]] += 1
+    return ctr.most_common(1)[0][0] if ctr else ""
+
+
+def load_my_uid_from_cache() -> str:
+    """读 INIT_REQ_BIN（当前 account ctx），抽 self uid。失败返回 ''。"""
+    try:
+        path = str(INIT_REQ_BIN)
+        if not os.path.exists(path):
+            return ""
+        with open(path, "rb") as f:
+            return extract_my_uid(f.read())
+    except Exception as e:
+        print(f"[load_my_uid] 失败: {e}")
+        return ""
+
+
 # ── 火花解析（正则字节匹配，速度快）────────────────────────────────────
 
 def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
@@ -1531,24 +1565,30 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
              if conv_pos < p < conv_pos + 60000 and mk == "consecutive_chat"),
             None,
         )
-        if not match:
+        # 状态分类：
+        #   active —— 火花仍在燃烧，正常续即可（有 consecutive_chat 且未过期）
+        #   broken —— 火花已断，抖音 web 显示「续火花」按钮，需主动重燃
+        if match:
+            days, marker = match
+            # consecutive_chat_data.expire_time 是火花过期 unix 秒；< 当前时间 → 已断
+            exp_ts = next((e for p, e in chat_data_entries
+                           if conv_pos < p < conv_pos + 60000), None)
+            if exp_ts and exp_ts < _now_ts:
+                status = "broken"
+                from datetime import datetime as _dt
+                _log(f"  [parse] uid={uid}: expire_time={exp_ts}"
+                     f" ({_dt.fromtimestamp(exp_ts):%Y-%m-%d %H:%M}) 已过期 → 需重燃", "PARSE")
+            else:
+                status = "active"
+        else:
+            # 没有 consecutive_chat，只剩 rekindled 记录 → 火花已断，需重燃
             _rekindled = next(((d, mk) for p, d, mk in streak_entries
                                if conv_pos < p < conv_pos + 60000), None)
-            if _rekindled:
-                _log(f"  [parse] 跳过 uid={uid}: 仅有 {_rekindled[1]}={_rekindled[0]}天（火花已断）", "PARSE")
-            continue
-        days, marker = match
-
-        # 校验 expire_time：consecutive_chat_data.expire_time 是火花过期 unix 秒
-        # < 当前时间 → 火花已断（抖音 web 显示「续火花」按钮），脚本不能直接续 → 跳过
-        exp_ts = next((e for p, e in chat_data_entries
-                       if conv_pos < p < conv_pos + 60000), None)
-        if exp_ts and exp_ts < _now_ts:
-            from datetime import datetime as _dt
-            _log(f"  [parse] 跳过 uid={uid}: expire_time={exp_ts}"
-                 f" ({_dt.fromtimestamp(exp_ts):%Y-%m-%d %H:%M}) 已过期，火花已断需主动续",
-                 "PARSE")
-            continue
+            if not _rekindled:
+                continue
+            days, marker = _rekindled
+            status = "broken"
+            _log(f"  [parse] uid={uid}: 仅有 {marker}={days}天 → 需重燃", "PARSE")
 
         sec_uid  = _find_sec_uid_for_uid(resp_bytes, uid, my_sec_uids)
         nickname = _find_nickname_by_sec_uid(resp_bytes, sec_uid)
@@ -1559,11 +1599,16 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             "conv_id": conv_id, "uid": uid,
             "sec_uid": sec_uid, "days": days,
             "nickname": nickname,
+            # 头像走 fetch_nicknames 的 user JSON（按 uid 精确对应）；
+            # init 二进制响应里按距离猜头像会张冠李戴，故此处留空待补
+            "avatar": "",
+            "status": status,
             "conversation_short_id": short_id,
             "ticket": ticket,
         })
 
-    return sorted(result, key=lambda x: x["days"], reverse=True)
+    # active 在前、broken 在后，各自按天数倒序
+    return sorted(result, key=lambda x: (x["status"] != "active", -x["days"]))
 
 
 def _is_group_uid(uid: str, cached_nicks: dict) -> bool:
@@ -1580,14 +1625,33 @@ def _is_group_uid(uid: str, cached_nicks: dict) -> bool:
 
 # ── 获取昵称（备用，缓存优先）─────────────────────────────────────────
 
-def _extract_user_fields(u: dict) -> tuple[str, str, str, str]:
-    """从用户对象里抽取 (uid, sec_uid, nick, remark)"""
+def _extract_avatar(u: dict) -> str:
+    """从用户对象里抽取头像 URL（优先小图，省流量）。找不到返回 ''。"""
+    for key in ("avatar_thumb", "avatar_168x168", "avatar_300x300",
+                "avatar_medium", "avatar_larger", "avatar"):
+        a = u.get(key)
+        if isinstance(a, dict):
+            lst = a.get("url_list") or a.get("urlList") or []
+            if lst and isinstance(lst[0], str) and lst[0].startswith("http"):
+                return lst[0]
+        elif isinstance(a, str) and a.startswith("http"):
+            return a
+    for key in ("avatar_url", "avatarUrl", "avatar_uri"):
+        v = u.get(key)
+        if isinstance(v, str) and v.startswith("http"):
+            return v
+    return ""
+
+
+def _extract_user_fields(u: dict) -> tuple[str, str, str, str, str]:
+    """从用户对象里抽取 (uid, sec_uid, nick, remark, avatar)"""
     uid    = str(u.get("uid") or u.get("user_id") or u.get("id") or "")
     sec    = u.get("sec_uid") or u.get("sec_user_id") or ""
     nick   = (u.get("nickname") or u.get("nick_name") or "").strip()
     remark = (u.get("remark_name") or u.get("remarkName") or
               u.get("remark")      or u.get("alias")     or "").strip()
-    return uid, sec, nick, remark
+    avatar = _extract_avatar(u)
+    return uid, sec, nick, remark, avatar
 
 
 def _walk_users(obj, callback):
@@ -1601,6 +1665,45 @@ def _walk_users(obj, callback):
         for v in obj.values():
             if isinstance(v, (dict, list)):
                 _walk_users(v, callback)
+
+
+def fetch_self_profile(session: requests.Session, my_uid: str) -> dict:
+    """拉自己的 profile（昵称 + 头像）。
+
+    抖音 `/user/profile/other?user_id=<my_uid>` 对自己的 uid 同样返回 self profile。
+    返回 {"nickname": str, "avatar": str}，任何失败都静默返回空 dict — 调用方判空。
+    """
+    if not my_uid:
+        return {}
+    try:
+        params = {
+            "device_platform": "webapp",  "aid": "6383",
+            "channel": "channel_pc_web",  "version_code": "170400",
+            "version_name": "17.4.0",     "cookie_enabled": "true",
+            "platform": "PC",             "downlink": "10",
+            "browser_language": "zh-CN",  "browser_platform": "MacIntel",
+            "browser_name": "Chrome",     "browser_version": "147.0.0.0",
+            "os_name": "Mac OS",
+            "user_id": str(my_uid),
+            "publish_video_strategy_type": "2",
+            "personal_center_strategy": "1", "from_page": "user",
+        }
+        qs = _sign_params(params)
+        r = session.get(f"https://www.douyin.com/aweme/v1/web/user/profile/other/?{qs}",
+                        timeout=10)
+        if not r.text.strip().startswith("{"):
+            return {}
+        j = r.json()
+        if j.get("status_code") != 0:
+            return {}
+        u = j.get("user") or {}
+        return {
+            "nickname": (u.get("nickname") or "").strip(),
+            "avatar":   _extract_avatar(u),
+        }
+    except Exception as e:
+        print(f"[self_profile] 失败: {e}")
+        return {}
 
 
 def fetch_nicknames(session: requests.Session, contacts: list[dict]) -> dict[str, dict]:
@@ -1623,14 +1726,15 @@ def fetch_nicknames(session: requests.Session, contacts: list[dict]) -> dict[str
         "os_name": "Mac OS",
     }
 
-    def _merge(uid: str, sec: str, nick: str, remark: str):
+    def _merge(uid: str, sec: str, nick: str, remark: str, avatar: str = ""):
         if not uid and sec and sec in sec2uid:
             uid = sec2uid[sec]
         if not uid or uid not in my_uids:
             return
-        prev = out.get(uid, {"nick": "", "remark": ""})
+        prev = out.get(uid, {"nick": "", "remark": "", "avatar": ""})
         if nick:   prev["nick"]   = nick
         if remark: prev["remark"] = remark
+        if avatar: prev["avatar"] = avatar
         out[uid] = prev
 
     # 1) IM 好友/关系链接口 — 通常含 remark_name（带分页）
@@ -1703,8 +1807,9 @@ def fetch_nicknames(session: requests.Session, contacts: list[dict]) -> dict[str
                 continue
             nick   = (u.get("nickname") or "").strip()
             remark = (u.get("remark_name") or "").strip()
-            if nick or remark:
-                out[c["uid"]] = {"nick": nick, "remark": remark}
+            avatar = _extract_avatar(u)
+            if nick or remark or avatar:
+                out[c["uid"]] = {"nick": nick, "remark": remark, "avatar": avatar}
                 # 顺便把 user 里的真实 sec_uid 存回 contacts（如果之前挖错了）
                 real_sec = u.get("sec_uid") or ""
                 if real_sec and real_sec != c.get("sec_uid"):
@@ -2248,8 +2353,9 @@ def main():
                 info = fetched.get(c["uid"], {})
                 nick = info.get("nick", "") if isinstance(info, dict) else str(info)
                 remark = info.get("remark", "") if isinstance(info, dict) else ""
-                if nick or remark:
-                    contacts_cache[c["uid"]] = {"nick": nick, "remark": remark}
+                avatar = info.get("avatar", "") if isinstance(info, dict) else ""
+                if nick or remark or avatar:
+                    contacts_cache[c["uid"]] = {"nick": nick, "remark": remark, "avatar": avatar}
                     c["nickname"] = remark or nick
             try:
                 json.dump(contacts_cache, open(CONTACTS_FILE, "w"), ensure_ascii=False)

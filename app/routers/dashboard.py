@@ -75,6 +75,102 @@ def _compute_health_one(acc: DouyinAccount, recent_runs: list, now: datetime) ->
     return {"level": "green", "label": "正常", "reason": "运行正常"}
 
 
+def _fill_missing_avatars(accounts: list[DouyinAccount], user_id: int, db: Session) -> None:
+    """对 avatar 为空且能用 cookies 拉的账户，同步拉一次 self profile 写入。
+
+    Why: 用户进 dashboard 期望看到真实头像，而不是首字母 fallback。
+    How: 每个账户独立 try，失败/超时静默跳过——不阻塞 dashboard 渲染。
+    若 dy_uid 也缺失，先从已缓存的 init.bin 抽出来。
+    """
+    targets = [a for a in accounts
+               if not a.avatar and a.cookies_exist and a.status == "active"]
+    if not targets:
+        return
+    changed = False
+    for acc in targets:
+        try:
+            set_account_ctx(AccountCtx(user_id, acc.id))
+            # 缺 dy_uid 先补
+            if not acc.dy_uid:
+                my_uid = dy.load_my_uid_from_cache()
+                if my_uid:
+                    acc.dy_uid = my_uid
+                    changed = True
+            if not acc.dy_uid:
+                continue
+            session = dy._load_session()
+            if not session:
+                continue
+            prof = dy.fetch_self_profile(session, acc.dy_uid)
+            if prof.get("avatar"):
+                acc.avatar = prof["avatar"]
+                changed = True
+                if prof.get("nickname") and not acc.nickname:
+                    acc.nickname = prof["nickname"]
+        except Exception as e:
+            print(f"[dashboard] 拉 acc#{acc.id} self avatar 失败: {e}")
+    if changed:
+        try:
+            db.commit()
+        except Exception as e:
+            print(f"[dashboard] 写入 avatar 失败: {e}")
+            db.rollback()
+
+
+def _backfill_avatars_for_page(user_id: int, account_id: int, contacts_page: list[dict]) -> None:
+    """对本页缺头像的联系人，调一次 fetch_nicknames 写回缓存 + 注入返回结构。
+
+    Why: 旧 contacts.json 缓存里只存了 nick/remark，没存 avatar 字段。
+    用户进 account 页时若发现一批可见联系人都没头像，懒加载补齐——
+    只补"本页可见的 30 个"，避免一次性抓 4000+ 个慢。
+    """
+    missing = [c for c in contacts_page
+               if not c.get("avatar") and c.get("sec_uid")]
+    if not missing:
+        return
+    try:
+        set_account_ctx(AccountCtx(user_id, account_id))
+        session = dy._load_session()
+        if not session:
+            return
+        captured = dy.fetch_nicknames(session, missing)
+        if not captured:
+            return
+        # 合并写 contacts.json 缓存（原子写）
+        cache_path = str(dy.CONTACTS_FILE)
+        try:
+            existing = json.load(open(cache_path)) if os.path.exists(cache_path) else {}
+        except Exception:
+            existing = {}
+        for uid, info in captured.items():
+            prev = existing.get(uid) if isinstance(existing.get(uid), dict) else {}
+            merged = dict(prev) if isinstance(prev, dict) else {}
+            for k in ("nick", "remark", "avatar"):
+                if info.get(k):
+                    merged[k] = info[k]
+            existing[uid] = merged
+        # 原子写
+        import tempfile
+        cache_dir = os.path.dirname(cache_path) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=cache_dir, prefix=".tmp_", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(existing, f, ensure_ascii=False)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            if os.path.exists(tmp_path): os.unlink(tmp_path)
+            raise
+        # 把 avatar 注入本页 contacts，让本次渲染就能看到
+        for c in contacts_page:
+            info = captured.get(c.get("uid"))
+            if info and info.get("avatar"):
+                c["avatar"] = info["avatar"]
+    except Exception as e:
+        print(f"[backfill_avatars] acc#{account_id} 失败: {e}")
+
+
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request, user=Depends(page_require_active), db: Session = Depends(get_db)):
     accounts = (db.query(DouyinAccount)
@@ -85,6 +181,8 @@ def dashboard(request: Request, user=Depends(page_require_active), db: Session =
     remain_days = (user.expires_at - now).days if user.expires_at else 0
     # 一次聚合查询计算所有账户的健康状态（避免 N+1）
     health_map = _compute_health_map(accounts, db, now)
+    # 顺手为没有 avatar 的活跃账户拉一次 self profile（best-effort, 静默失败）
+    _fill_missing_avatars(accounts, user.id, db)
     return request.app.state.tmpl.TemplateResponse("dashboard/index.html", {
         "request": request,
         "user": user,
@@ -142,11 +240,15 @@ def account_page(
                     or q_lower in (c.get("uid") or "").lower()
                     or q_lower in (c.get("remark") or "").lower()]
     filtered_total = len(contacts)
+    active_total = sum(1 for c in contacts if c.get("status", "active") == "active")
+    broken_total = filtered_total - active_total
     per_page = 30
     total_pages = max(1, (filtered_total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     start = (page - 1) * per_page
     contacts_page = contacts[start:start + per_page]
+    # 当本页联系人缺头像（旧 cache 未存 avatar）→ 同步拉一次写回（best-effort）
+    _backfill_avatars_for_page(user.id, acc.id, contacts_page)
 
     return request.app.state.tmpl.TemplateResponse("dashboard/account.html", {
         "request": request,
@@ -158,7 +260,9 @@ def account_page(
         "finalizing": finalizing,
         "q": q, "page": page, "total_pages": total_pages,
         "full_total": full_total, "filtered_total": filtered_total,
+        "active_total": active_total, "broken_total": broken_total,
         "per_page": per_page,
+        "now": datetime.now(),
     })
 
 

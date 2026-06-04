@@ -94,6 +94,28 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
                 f"conv_ids={len(all_convs)} 个, 解析出火花联系人={len(contacts)} 个", "INFO")
     except Exception:
         pass
+    # 顺手把 self uid + avatar 写回 DouyinAccount（dashboard 显示真实头像用）
+    try:
+        my_uid = dy.extract_my_uid(resp.content)
+        if my_uid:
+            with SessionLocal() as _db:
+                from .models import DouyinAccount
+                _acc = _db.get(DouyinAccount, ctx.account_id)
+                changed = False
+                if _acc and _acc.dy_uid != my_uid:
+                    _acc.dy_uid = my_uid
+                    changed = True
+                if _acc and not _acc.avatar:
+                    prof = dy.fetch_self_profile(session, my_uid)
+                    if prof.get("avatar"):
+                        _acc.avatar = prof["avatar"]
+                        changed = True
+                        if prof.get("nickname") and not _acc.nickname:
+                            _acc.nickname = prof["nickname"]
+                if changed:
+                    _db.commit()
+    except Exception as _e:
+        print(f"[ensure_active] 写 self uid/avatar 失败: {_e}")
     # 合并缓存昵称
     try:
         cache = json.load(open(str(dy.CONTACTS_FILE)))
@@ -103,8 +125,10 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
         info = cache.get(c["uid"], {})
         if isinstance(info, dict):
             c["nickname"] = info.get("remark") or info.get("nick") or c["uid"]
+            c["avatar"] = info.get("avatar") or ""
         else:
             c["nickname"] = info or c["uid"]
+            c["avatar"] = ""
     return session, constants, contacts
 
 
@@ -184,6 +208,13 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
             templates = {}
 
     sent = skipped = failed = 0
+    # 火花已断（status=broken）需在抖音 web 主动「续火花/重燃」，脚本直接发消息无法重燃，
+    # 自动续火花只针对仍在燃烧的 active 联系人；broken 计入 skipped 不发送，避免无效击打风控。
+    broken = [c for c in contacts if c.get("status") == "broken"]
+    if broken:
+        skipped += len(broken)
+        dy._log(f"[auto] 跳过 {len(broken)} 个需重燃（火花已断）联系人", "INFO")
+    contacts = [c for c in contacts if c.get("status", "active") == "active"]
     # 基于近期失败率自适应限速；随机 ±0.5s jitter 更像人工操作
     SEND_INTERVAL, _risk_level = _adaptive_interval(account_id, base=5.0)
     dy._log(f"[auto] send interval = {SEND_INTERVAL}s ({_risk_level})", "RATE")

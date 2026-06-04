@@ -57,14 +57,33 @@
           colors: {
             brand: { 50:'#eef2ff', 100:'#e0e7ff', 200:'#c7d2fe', 300:'#a5b4fc',
                      400:'#818cf8', 500:'#6366f1', 600:'#4f46e5', 700:'#4338ca',
-                     800:'#3730a3', 900:'#312e81' }
+                     800:'#3730a3', 900:'#312e81' },
+            // iOS / Apple 设计语言色板
+            ios: {
+              tint:  '#FF9500',  tintBg: '#FFF3E0',
+              blue:  '#007AFF',  blueBg: '#E7F1FF',
+              green: '#34C759',  greenBg:'#E6F8EC',
+              red:   '#FF3B30',  redBg:  '#FFECEB',
+              purple:'#AF52DE',  purpleBg:'#F4EAFB',
+              label: '#1C1C1E',  label2: '#6E6E73',  label3:'#AEAEB2',
+              sep:   '#E5E5EA',  sepStrong:'#D1D1D6',
+              bg:    '#F2F2F7',  fill2: '#F2F2F7',  fill3: '#E9E9EB',
+            },
           },
           fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui'] },
+          boxShadow: {
+            'apple':    '0 1px 2px rgba(0,0,0,0.06), 0 10px 24px -10px rgba(0,0,0,0.08)',
+            'apple-lg': '0 20px 60px -20px rgba(28,28,30,0.35)',
+          },
         }
       }
     };
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+  <!-- 阿里图标(iconify, line 风) + GSAP + html2canvas -->
+  <script src="https://cdn.jsdelivr.net/npm/iconify-icon@2.1.0/dist/iconify-icon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" defer></script>
   <style>
     html { font-family: 'Inter', ui-sans-serif, system-ui; }
     body { min-height: 100vh; }
@@ -85,7 +104,37 @@
       .pill-rose { @apply bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400; }
       .pill-slate { @apply bg-slate-100 dark:bg-slate-700/50 text-slate-700 dark:text-slate-300; }
       .pill-indigo { @apply bg-brand-100 dark:bg-brand-900/30 text-brand-700 dark:text-brand-400; }
+
+      /* —— Apple / iOS 风格组件 —— */
+      .apple-card    { @apply bg-white/72 dark:bg-slate-800/72 backdrop-blur-xl rounded-2xl border border-white/60 dark:border-slate-700/60 shadow-apple; }
+      .apple-card-solid { @apply bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-apple; }
+      .apple-btn     { @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed; }
+      .apple-btn-tint{ @apply apple-btn bg-ios-tint hover:bg-ios-tint/90 text-white; }
+      .apple-btn-blue{ @apply apple-btn bg-ios-blue hover:bg-ios-blue/90 text-white; }
+      .apple-btn-red { @apply apple-btn bg-ios-red hover:bg-ios-red/90 text-white; }
+      .apple-btn-sec { @apply apple-btn bg-ios-fill2 hover:bg-ios-fill3 text-ios-label dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-100 border border-ios-sep dark:border-slate-600; }
+      .apple-chip    { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold; }
+      .apple-chip-tint  { @apply apple-chip bg-ios-tintBg text-ios-tint; }
+      .apple-chip-blue  { @apply apple-chip bg-ios-blueBg text-ios-blue; }
+      .apple-chip-green { @apply apple-chip bg-ios-greenBg text-ios-green; }
+      .apple-chip-red   { @apply apple-chip bg-ios-redBg text-ios-red; }
+      .apple-chip-purple{ @apply apple-chip bg-ios-purpleBg text-ios-purple; }
+      .apple-chip-gray  { @apply apple-chip bg-ios-fill3 text-ios-label2 dark:bg-slate-700/60 dark:text-slate-300; }
+      /* iOS 风开关 */
+      .ios-switch { @apply relative inline-flex w-11 h-6 rounded-full transition-colors cursor-pointer; }
+      .ios-switch-on  { @apply bg-ios-green; }
+      .ios-switch-off { @apply bg-ios-fill3 dark:bg-slate-600; }
+      .ios-switch-knob{ @apply absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform; }
+      .ios-switch-on .ios-switch-knob { @apply translate-x-5; }
+      /* 段控（segmented control） */
+      .ios-seg { @apply inline-flex items-center gap-0 p-0.5 rounded-xl bg-ios-fill3 dark:bg-slate-700; }
+      .ios-seg-item { @apply px-3 py-1.5 rounded-[10px] text-xs font-semibold text-ios-label2 dark:text-slate-300 cursor-pointer transition; }
+      .ios-seg-item.on { @apply bg-white dark:bg-slate-800 text-ios-label dark:text-slate-100 shadow-sm; }
     }
+  </style>
+  <style>
+    /* iconify-icon 默认 vertical-align 是 baseline，会让 inline 图标偏移 */
+    iconify-icon { display: inline-flex; vertical-align: -2px; }
   </style>
   {% block head %}{% endblock %}
 </head>

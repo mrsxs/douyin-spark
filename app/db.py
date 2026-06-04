@@ -53,12 +53,23 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_schedule_enabled_time "
         "ON schedules(enabled, time_hhmm)",
     ]
+    # 幂等加列：SQLite 没 IF NOT EXISTS，try/except
+    add_columns = [
+        ("douyin_accounts", "avatar", "VARCHAR(512)"),
+    ]
     with engine.begin() as conn:
         for sql in ddl:
             try:
                 conn.execute(text(sql))
             except Exception as e:
                 print(f"[init_db] 创建索引失败 ({sql[:60]}...): {e}")
+        for table, col, col_type in add_columns:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                print(f"[init_db] 列 {table}.{col} 已添加")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"[init_db] 加列 {table}.{col} 失败: {e}")
     try:
         _migrate_templates_json()
     except Exception as e:

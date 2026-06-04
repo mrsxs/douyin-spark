@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% from "macros/_macros.html" import status_pill, modal_shell %}
+{% from "macros/_macros.html" import status_pill, modal_shell, apple_modal %}
 {% block title %}Dashboard · {{ site_name }}{% endblock %}
 {% block content %}
 
-{# 推广：授权码快到期、max_accounts=0 或尚未激活时展示；活跃用户不打扰 #}
+{# 推广：授权码快到期、max_accounts=0 或尚未激活时展示 #}
 {% if not user.expires_at or remain_days <= 7 or user.max_accounts == 0 %}
 <div class="mb-4">
   {% include '_buy_cta.html' %}
 </div>
 {% endif %}
 
-<div x-data="{ delAccId: null, delAccLabel: '', delModalOpen: false, ann: null }"
+<div x-data="{ delAccId: null, delAccLabel: '', delModalOpen: false, ann: null, addOpen: false }"
      x-init="
        fetch('/api/announcement').then(r=>r.json()).then(r => {
          if (!r.ok || !r.announcement) return;
@@ -22,105 +22,154 @@
        }).catch(()=>{});
      ">
 
-<!-- License 状态卡 -->
-<div class="card p-6 mb-6">
-  <div class="flex flex-col sm:flex-row sm:items-center gap-4">
+<!-- License Hero -->
+<div class="apple-card-solid p-6 mb-6 relative overflow-hidden">
+  <!-- 背景火花光晕 -->
+  <div class="absolute -top-12 -right-12 w-56 h-56 rounded-full bg-ios-tint/15 blur-3xl pointer-events-none"></div>
+  <div class="relative flex flex-col sm:flex-row sm:items-center gap-6">
     <div class="flex-1">
-      <div class="flex items-center gap-3 mb-2">
-        <span class="pill pill-green">有效</span>
-        <h2 class="text-lg font-semibold">许可状态</h2>
+      <div class="flex items-center gap-2 mb-1">
+        <iconify-icon icon="lucide:flame" width="20" height="20" class="text-ios-tint"></iconify-icon>
+        <h2 class="text-base font-semibold text-ios-label dark:text-slate-100">{{ user.username }} 的火花</h2>
+        {% if user.is_admin %}
+          <span class="apple-chip-purple">管理员</span>
+        {% endif %}
       </div>
-      <div class="text-sm text-slate-600 dark:text-slate-400">
-        到期时间：<strong class="text-slate-900 dark:text-slate-100">{{ user.expires_at.strftime("%Y-%m-%d %H:%M") }}</strong>
-        &middot; 还剩 <strong class="text-brand-600 dark:text-brand-400">{{ remain_days }}</strong> 天
+      <div class="flex items-baseline gap-3 mt-2">
+        <span class="text-4xl font-bold tracking-tight text-ios-label dark:text-slate-100">{{ remain_days }}</span>
+        <span class="text-sm text-ios-label2">天剩余</span>
+        <span class="apple-chip-green ml-auto sm:ml-2">
+          <iconify-icon icon="lucide:circle-check" width="13" height="13"></iconify-icon>
+          有效
+        </span>
       </div>
-      <div class="mt-3 w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2 overflow-hidden">
+      <div class="mt-3 w-full bg-ios-fill3 dark:bg-slate-700 rounded-full h-1.5 overflow-hidden">
         {% set pct = (remain_days / 365 * 100)|round(0, 'common')|int %}
         {% if pct > 100 %}{% set pct = 100 %}{% endif %}
         {% if pct < 3 %}{% set pct = 3 %}{% endif %}
-        <div class="bg-brand-600 h-2 rounded-full transition-all" style="width: {{ pct }}%"></div>
+        <div class="bg-ios-tint h-1.5 rounded-full transition-all" style="width: {{ pct }}%"></div>
       </div>
+      <div class="text-xs text-ios-label3 mt-2">到期时间：{{ user.expires_at.strftime("%Y-%m-%d %H:%M") }}</div>
     </div>
-    <div class="flex flex-col items-end gap-2 sm:w-64 shrink-0">
-      <div class="text-sm text-slate-600 dark:text-slate-400">抖音账户数</div>
-      <div class="text-3xl font-bold text-slate-900 dark:text-slate-100">
-        {{ accounts|length }}<span class="text-base font-normal text-slate-500"> / {{ user.max_accounts }}</span>
+
+    <div class="grid grid-cols-2 gap-3 sm:w-72 shrink-0">
+      <div class="apple-card-solid p-3">
+        <div class="text-xs text-ios-label3">抖音账号</div>
+        <div class="mt-1 text-2xl font-bold text-ios-label dark:text-slate-100">
+          {{ accounts|length }}<span class="text-sm font-normal text-ios-label3"> / {{ user.max_accounts }}</span>
+        </div>
       </div>
-      <a href="/activate" class="btn-sec text-xs">续期</a>
+      <a href="/activate" class="apple-card-solid p-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition group">
+        <div class="text-xs text-ios-label3">兑换续期</div>
+        <div class="mt-1 flex items-center gap-1 text-sm font-semibold text-ios-blue group-hover:underline">
+          授权码 <iconify-icon icon="lucide:arrow-right" width="14" height="14"></iconify-icon>
+        </div>
+      </a>
     </div>
   </div>
 </div>
 
-<!-- 账户网格 -->
+<!-- 标题栏 -->
 <div class="flex items-center justify-between mb-4">
-  <h2 class="text-lg font-semibold">我的抖音账户</h2>
+  <h2 class="text-lg font-semibold text-ios-label dark:text-slate-100">我的抖音账号</h2>
   {% if accounts|length < user.max_accounts %}
-    <button @click="$refs.addModal.showModal()" class="btn-primary">
-      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-      添加账户
+    <button @click="addOpen=true" class="apple-btn-tint">
+      <iconify-icon icon="lucide:plus" width="16" height="16"></iconify-icon>
+      添加账号
     </button>
   {% else %}
-    <span class="pill pill-amber">已达上限 {{ user.max_accounts }}</span>
+    <span class="apple-chip-tint">已达上限 {{ user.max_accounts }}</span>
   {% endif %}
 </div>
 
 {% if accounts %}
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
   {% for acc in accounts %}
-  <div class="card p-5 hover:shadow-md transition">
-    <div class="flex items-start justify-between mb-3">
-      <div class="flex-1 min-w-0">
-        <div class="font-semibold text-slate-900 dark:text-slate-100 truncate">{{ acc.nickname or acc.label }}</div>
-        <div class="text-xs text-slate-500 truncate">
-          {{ acc.label }}{% if acc.dy_uid %} · {{ acc.dy_uid }}{% endif %}
+  {% set h = health_map.get(acc.id, {"level": "slate", "label": acc.status, "reason": ""}) %}
+  {% if acc.last_run_at %}{% set days_ago = (now - acc.last_run_at).days %}{% else %}{% set days_ago = None %}{% endif %}
+  {% set tone_map = {'green':'green','amber':'tint','red':'red','slate':'gray'} %}
+  {% set tone = tone_map.get(h.level, 'gray') %}
+  <div class="apple-card-solid p-5 hover:shadow-apple-lg transition relative">
+    <!-- 头部：头像 + 名称 + 状态 chip -->
+    <div class="flex items-start justify-between mb-4">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="relative shrink-0 w-11 h-11">
+          <div class="absolute inset-0 rounded-full bg-ios-tintBg flex items-center justify-center text-base font-semibold text-ios-tint">
+            {{ (acc.nickname or acc.label)[:1]|upper }}
+          </div>
+          {% if acc.avatar %}
+          <img src="{{ acc.avatar }}" alt="{{ (acc.nickname or acc.label)|e }}" loading="lazy" referrerpolicy="no-referrer"
+               class="relative w-11 h-11 rounded-full object-cover ring-1 ring-slate-200 dark:ring-slate-700"
+               onerror="this.remove()" />
+          {% endif %}
+        </div>
+        <div class="min-w-0">
+          <div class="font-semibold text-ios-label dark:text-slate-100 truncate">{{ acc.nickname or acc.label }}</div>
+          <div class="text-xs text-ios-label3 truncate" title="{{ acc.label }}{% if acc.dy_uid %} · {{ acc.dy_uid }}{% endif %}">
+            {{ acc.label }}{% if acc.dy_uid %} · {{ acc.dy_uid }}{% endif %}
+          </div>
         </div>
       </div>
-      {% set h = health_map.get(acc.id, {"level": "slate", "label": acc.status, "reason": ""}) %}
-      {% set icons = {'green': '🟢', 'amber': '🟡', 'red': '🔴', 'slate': '⚪'} %}
-      {{ status_pill(h.level, h.label, icon=icons.get(h.level, ''), title=h.reason) }}
+      <span class="apple-chip-{{ tone }} shrink-0" title="{{ h.reason }}">
+        <span class="w-1.5 h-1.5 rounded-full bg-current"></span>
+        {{ h.label }}
+      </span>
     </div>
-    <!-- 核心指标：距上次发送多少天；0 = 今天，— = 从未 -->
-    {% if acc.last_run_at %}
-      {% set days_ago = (now - acc.last_run_at).days %}
-    {% else %}
-      {% set days_ago = None %}
-    {% endif %}
-    <div class="flex items-end justify-between mb-4 pt-1">
+
+    <!-- 关键指标 -->
+    <div class="flex items-end justify-between mb-4 px-1">
       <div class="flex items-baseline gap-1.5">
+        <iconify-icon icon="lucide:flame" width="20" height="20"
+          class="{% if days_ago is none %}text-ios-label3{% elif days_ago == 0 %}text-ios-tint{% elif days_ago <= 1 %}text-amber-500{% else %}text-ios-red{% endif %}"></iconify-icon>
         <span class="text-3xl font-bold leading-none tracking-tight
-                     {% if days_ago is none %}text-slate-400
-                     {% elif days_ago == 0 %}text-emerald-500
+                     {% if days_ago is none %}text-ios-label3
+                     {% elif days_ago == 0 %}text-ios-tint
                      {% elif days_ago <= 1 %}text-amber-500
-                     {% else %}text-rose-500{% endif %}">
+                     {% else %}text-ios-red{% endif %}">
           {% if days_ago is none %}—{% elif days_ago == 0 %}今天{% else %}{{ days_ago }}{% endif %}
         </span>
-        <span class="text-xs text-slate-500">
-          {% if days_ago is none %}尚未运行
-          {% elif days_ago == 0 %}已发送
-          {% else %}天前{% endif %}
+        <span class="text-xs text-ios-label3">
+          {% if days_ago is none %}尚未运行{% elif days_ago == 0 %}已发送{% else %}天前{% endif %}
         </span>
       </div>
-      <div class="text-xs text-slate-400 text-right leading-tight">
+      <div class="text-xs text-ios-label3 text-right leading-tight">
         {% if acc.last_run_at %}{{ acc.last_run_at.strftime("%m-%d %H:%M") }}{% endif %}
       </div>
     </div>
+
+    <!-- 操作 -->
     <div class="flex gap-2">
       {% if acc.status == "active" %}
-        <a href="/accounts/{{ acc.id }}" class="btn-primary flex-1 justify-center text-sm">打开</a>
+        <a href="/accounts/{{ acc.id }}" class="apple-btn-tint flex-1">
+          打开 <iconify-icon icon="lucide:arrow-right" width="15" height="15"></iconify-icon>
+        </a>
       {% else %}
-        <a href="/accounts/{{ acc.id }}/login" class="btn-primary flex-1 justify-center text-sm">登录</a>
+        <a href="/accounts/{{ acc.id }}/login" class="apple-btn-tint flex-1">登录</a>
       {% endif %}
       <div x-data="{open:false}" @click.outside="open=false" class="relative">
-        <button @click="open=!open" class="btn-sec !px-2"
+        <button @click="open=!open" class="apple-btn-sec !px-3"
                 aria-label="更多操作" aria-haspopup="menu" :aria-expanded="open">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 12.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5ZM12 18.75a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5Z" /></svg>
+          <iconify-icon icon="lucide:ellipsis-vertical" width="16" height="16"></iconify-icon>
         </button>
-        <div x-show="open" x-transition x-cloak class="absolute right-0 mt-1 w-40 bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-slate-200 dark:ring-slate-700 py-1 z-10">
-          <a href="/accounts/{{ acc.id }}/login" class="block px-4 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">重新登录</a>
-          <a href="/accounts/{{ acc.id }}/logs" class="block px-4 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">查看日志</a>
+        <div x-show="open" x-transition x-cloak
+             class="absolute right-0 mt-1 w-44 bg-white dark:bg-slate-800 rounded-xl shadow-apple-lg ring-1 ring-slate-200 dark:ring-slate-700 py-1 z-10">
+          <a href="/accounts/{{ acc.id }}/login" class="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">
+            <iconify-icon icon="lucide:log-in" width="15" height="15" class="text-ios-label2"></iconify-icon>
+            重新登录
+          </a>
+          <a href="/accounts/{{ acc.id }}/runs" class="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">
+            <iconify-icon icon="lucide:history" width="15" height="15" class="text-ios-label2"></iconify-icon>
+            运行历史
+          </a>
+          <a href="/accounts/{{ acc.id }}/logs" class="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-700">
+            <iconify-icon icon="lucide:scroll-text" width="15" height="15" class="text-ios-label2"></iconify-icon>
+            查看日志
+          </a>
+          <div class="border-t border-slate-100 dark:border-slate-700 my-1"></div>
           <button type="button"
-                  @click="delAccId={{ acc.id }}; delAccLabel='{{ acc.label|e }}'; delModalOpen=true"
-                  class="block w-full text-left px-4 py-2 text-sm text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20">
+                  @click="delAccId={{ acc.id }}; delAccLabel='{{ acc.label|e }}'; delModalOpen=true; open=false"
+                  class="w-full flex items-center gap-2 px-3 py-2 text-sm text-ios-red hover:bg-ios-redBg/40 dark:hover:bg-rose-900/20">
+            <iconify-icon icon="lucide:trash-2" width="15" height="15"></iconify-icon>
             删除账户
           </button>
         </div>
@@ -130,67 +179,79 @@
   {% endfor %}
 </div>
 {% else %}
-<div class="card p-12 text-center">
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor" class="w-16 h-16 mx-auto text-slate-400 mb-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" /></svg>
-  <h3 class="text-lg font-medium mb-2">还没有抖音账户</h3>
-  <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">添加第一个抖音账户以开始管理火花续签</p>
-  <button @click="$refs.addModal.showModal()" class="btn-primary">添加账户</button>
+<div class="apple-card-solid p-12 text-center">
+  <div class="w-16 h-16 mx-auto rounded-2xl bg-ios-tintBg flex items-center justify-center mb-4">
+    <iconify-icon icon="lucide:flame" width="32" height="32" class="text-ios-tint"></iconify-icon>
+  </div>
+  <h3 class="text-lg font-semibold mb-2 text-ios-label dark:text-slate-100">还没有抖音账号</h3>
+  <p class="text-sm text-ios-label2 mb-6">添加第一个抖音账号开始管理你的火花</p>
+  <button @click="addOpen=true" class="apple-btn-tint">添加账号</button>
 </div>
 {% endif %}
 
-<!-- Add Modal -->
-<dialog x-ref="addModal" class="rounded-xl p-0 backdrop:bg-slate-900/50 open:animate-[fadeIn_0.2s]">
+<!-- 添加账号 Modal -->
+{% call apple_modal('addModal', 'addOpen', size='sm', title='添加抖音账号', subtitle='创建后需扫码或短信登录') %}
   <form method="post" action="/accounts/new"
         x-data="{ submitting: false }"
         @submit="if (submitting) { $event.preventDefault(); return; } submitting = true"
-        class="bg-white dark:bg-slate-800 p-6 w-96 max-w-[90vw]">
+        class="p-5 space-y-4">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <h3 class="text-lg font-semibold mb-4">添加抖音账户</h3>
-    <label class="label">账户名（便于区分）</label>
-    <input name="label" class="input" placeholder="例如：主号 / 工作号" required autofocus maxlength="40" :readonly="submitting" />
-    <p class="text-xs text-slate-500 mt-2">创建后需要扫码或短信登录该账户</p>
-    <div class="flex justify-end gap-2 mt-6">
-      <button type="button" @click="$refs.addModal.close()" class="btn-sec" :disabled="submitting">取消</button>
-      <button type="submit" class="btn-primary" :disabled="submitting">
+    <div>
+      <label class="label">账户名（便于区分）</label>
+      <input name="label" class="input" placeholder="例如：主号 / 工作号" required autofocus maxlength="40" :readonly="submitting" />
+    </div>
+    <div class="flex justify-end gap-2 pt-2">
+      <button type="button" @click="addOpen=false" class="apple-btn-sec" :disabled="submitting">取消</button>
+      <button type="submit" class="apple-btn-tint" :disabled="submitting">
         <span x-show="!submitting">创建并登录</span>
-        <span x-show="submitting" x-cloak>创建中...</span>
+        <span x-show="submitting" x-cloak>创建中…</span>
       </button>
     </div>
   </form>
-</dialog>
+{% endcall %}
 
 <!-- 公告 Modal -->
-<dialog x-ref="annModal" class="rounded-xl p-0 backdrop:bg-slate-900/50">
-  <div class="bg-white dark:bg-slate-800 p-6 w-[36rem] max-w-[92vw]">
+<dialog x-ref="annModal" class="p-0 bg-transparent backdrop:bg-slate-900/60">
+  <div class="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-apple-lg w-[36rem] max-w-[92vw] overflow-hidden">
     <template x-if="ann">
       <div>
-        <div class="flex items-center gap-2 mb-3">
-          <span class="pill pill-indigo">📢 公告</span>
-          <h3 class="text-lg font-semibold" x-text="ann.title"></h3>
+        <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
+          <span class="apple-chip-blue">
+            <iconify-icon icon="lucide:megaphone" width="13" height="13"></iconify-icon>
+            公告
+          </span>
+          <h3 class="text-base font-semibold text-ios-label dark:text-slate-100" x-text="ann.title"></h3>
         </div>
-        <div class="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed" x-text="ann.content"></div>
-        <div class="text-xs text-slate-500 mt-4" x-text="'更新于 ' + (ann.updated_at||'').slice(0,16).replace('T',' ')"></div>
-        <div class="flex justify-end gap-2 mt-6">
+        <div class="p-5">
+          <div class="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed" x-text="ann.content"></div>
+          <div class="text-xs text-ios-label3 mt-4" x-text="'更新于 ' + (ann.updated_at||'').slice(0,16).replace('T',' ')"></div>
+        </div>
+        <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-700 flex justify-end">
           <button type="button"
                   @click="localStorage.setItem('ann_read_'+ann.id+'_'+ann.updated_at, '1'); $refs.annModal.close()"
-                  class="btn-primary">知道了</button>
+                  class="apple-btn-tint">知道了</button>
         </div>
       </div>
     </template>
   </div>
 </dialog>
 
-<!-- Delete Modal（macro 封装版；因为带 form action 动态绑定 + CSRF token，用 modal_shell 手写 body）-->
-{% call modal_shell('delModal', 'delModalOpen', size='md', title=None) %}
-  <form method="post" :action="'/accounts/' + delAccId + '/delete'">
+<!-- 删除账户 Modal（Apple 危险确认风） -->
+{% call apple_modal('delModal', 'delModalOpen', size='sm', title=None) %}
+  <form method="post" :action="'/accounts/' + delAccId + '/delete'" class="p-6">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <h3 class="text-lg font-semibold mb-2">确认删除账户</h3>
-    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">
-      将永久删除账户「<strong class="text-slate-900 dark:text-slate-100" x-text="delAccLabel"></strong>」及其 cookies、模板、日志等所有数据。此操作不可恢复。
-    </p>
-    <div class="flex justify-end gap-2 mt-6">
-      <button type="button" @click="delModalOpen=false" class="btn-sec">取消</button>
-      <button type="submit" class="btn-primary !bg-rose-600 hover:!bg-rose-700">确认删除</button>
+    <div class="flex flex-col items-center text-center">
+      <div class="w-14 h-14 rounded-full bg-ios-redBg flex items-center justify-center mb-3">
+        <iconify-icon icon="lucide:trash-2" width="26" height="26" class="text-ios-red"></iconify-icon>
+      </div>
+      <h3 class="text-lg font-bold text-ios-label dark:text-slate-100">删除账户「<span x-text="delAccLabel"></span>」？</h3>
+      <p class="text-sm text-ios-label2 mt-2 leading-relaxed">
+        此操作不可撤销。该账户的所有 cookies、模板、运行记录将被永久删除。
+      </p>
+    </div>
+    <div class="grid grid-cols-2 gap-2 mt-6">
+      <button type="button" @click="delModalOpen=false" class="apple-btn-sec">取消</button>
+      <button type="submit" class="apple-btn-red">删除</button>
     </div>
   </form>
 {% endcall %}

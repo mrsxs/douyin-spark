@@ -1,76 +1,81 @@
-{% extends "base.html" %}
-{% block title %}用户 · 管理后台{% endblock %}
-{% block content %}
-<div class="mb-6">
-  <div class="text-sm text-slate-500"><a href="/admin" class="hover:underline">← 管理后台</a></div>
-  <h1 class="text-2xl font-bold mt-1">用户</h1>
-</div>
+{% extends "admin/_layout.html" %}
+{% set active_nav = "users" %}
+{% block page_title %}用户管理{% endblock %}
+{% block page_subtitle %}共 {{ total }} 位用户{% endblock %}
 
-<div class="card p-4 mb-4 flex flex-col sm:flex-row gap-3">
-  <form method="get" class="flex-1 flex gap-2">
-    <input name="q" value="{{ q }}" placeholder="搜索用户名或邮箱" class="input flex-1" />
-    <select name="status" class="input !w-auto">
-      <option value="all" {% if status == "all" %}selected{% endif %}>全部</option>
-      <option value="active" {% if status == "active" %}selected{% endif %}>活跃</option>
-      <option value="expired" {% if status == "expired" %}selected{% endif %}>已过期</option>
-      <option value="inactive" {% if status == "inactive" %}selected{% endif %}>已禁用</option>
-    </select>
-    <button class="btn-primary">搜索</button>
-  </form>
-</div>
+{% block admin_content %}
+<form method="get" class="flex flex-wrap items-center gap-3 mb-4">
+  <div class="relative flex-1 min-w-[240px] max-w-md">
+    <iconify-icon icon="lucide:search" width="16" height="16"
+      class="absolute left-3 top-1/2 -translate-y-1/2 text-ios-label3 pointer-events-none"></iconify-icon>
+    <input name="q" value="{{ q }}" placeholder="搜索用户名 / 邮箱…" class="input !pl-9 !rounded-xl !bg-ios-fill2 !border-transparent" />
+  </div>
+  <div class="ios-seg">
+    {% for v, label in [('all','全部'),('active','活跃'),('expired','过期'),('inactive','禁用')] %}
+    <button type="submit" name="status" value="{{ v }}" class="ios-seg-item {% if status == v %}on{% endif %}">{{ label }}</button>
+    {% endfor %}
+  </div>
+</form>
 
-<div class="card overflow-hidden">
+<div class="apple-card-solid overflow-hidden">
   <table class="w-full">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+    <thead class="bg-ios-fill2 dark:bg-slate-700/30 text-xs text-ios-label3 font-medium">
       <tr>
-        <th class="px-4 py-3 text-left">用户名</th>
-        <th class="px-4 py-3 text-left">邮箱</th>
-        <th class="px-4 py-3 text-center">状态</th>
-        <th class="px-4 py-3 text-left">到期</th>
-        <th class="px-4 py-3 text-center">账户数</th>
-        <th class="px-4 py-3 text-left">注册时间</th>
-        <th class="px-4 py-3"></th>
+        <th class="px-5 py-3 text-left">用户</th>
+        <th class="px-5 py-3 text-left">邮箱</th>
+        <th class="px-5 py-3 text-center">状态</th>
+        <th class="px-5 py-3 text-left">到期</th>
+        <th class="px-5 py-3 text-center">账号数</th>
+        <th class="px-5 py-3 text-left">注册时间</th>
+        <th class="px-5 py-3"></th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700 text-sm">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-sm">
       {% for u in users %}
-      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/30">
-        <td class="px-4 py-3">
-          <a href="/admin/users/{{ u.id }}" class="font-medium text-brand-600 dark:text-brand-400 hover:underline">{{ u.username }}</a>
-          {% if u.is_admin %}<span class="pill pill-indigo ml-1">admin</span>{% endif %}
+      <tr class="hover:bg-ios-fill2/50 dark:hover:bg-slate-700/20">
+        <td class="px-5 py-3">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full bg-ios-purpleBg flex items-center justify-center text-sm font-semibold text-ios-purple shrink-0">
+              {{ u.username[:1]|upper }}
+            </div>
+            <div class="min-w-0">
+              <a href="/admin/users/{{ u.id }}" class="font-medium text-ios-label dark:text-slate-100 hover:text-ios-blue truncate block">{{ u.username }}</a>
+              {% if u.is_admin %}<span class="apple-chip-purple text-[10px]">admin</span>{% endif %}
+            </div>
+          </div>
         </td>
-        <td class="px-4 py-3 text-slate-500">{{ u.email or "-" }}</td>
-        <td class="px-4 py-3 text-center">
+        <td class="px-5 py-3 text-ios-label2 font-mono text-xs">{{ u.email or "—" }}</td>
+        <td class="px-5 py-3 text-center">
           {% if not u.is_active %}
-            <span class="pill pill-slate">已禁用</span>
+            <span class="apple-chip-gray">已禁用</span>
           {% elif u.expires_at and u.expires_at > now %}
-            <span class="pill pill-green">活跃</span>
+            <span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>活跃</span>
           {% else %}
-            <span class="pill pill-rose">过期</span>
+            <span class="apple-chip-red">过期</span>
           {% endif %}
         </td>
-        <td class="px-4 py-3 text-slate-500">
-          {% if u.expires_at %}{{ u.expires_at.strftime("%Y-%m-%d") }}{% else %}-{% endif %}
+        <td class="px-5 py-3 text-ios-label2 font-mono text-xs">
+          {% if u.expires_at %}{{ u.expires_at.strftime("%Y-%m-%d") }}{% else %}—{% endif %}
         </td>
-        <td class="px-4 py-3 text-center">
-          <span class="pill pill-slate">{{ u._acc_count|default(0) }} / {{ u.max_accounts }}</span>
+        <td class="px-5 py-3 text-center">
+          <span class="apple-chip-gray">{{ u._acc_count|default(0) }} / {{ u.max_accounts }}</span>
         </td>
-        <td class="px-4 py-3 text-slate-500 text-xs">{{ u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "-" }}</td>
-        <td class="px-4 py-3 text-right">
-          <a href="/admin/users/{{ u.id }}" class="btn-sec text-xs">详情</a>
+        <td class="px-5 py-3 text-ios-label3 font-mono text-xs">{{ u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "—" }}</td>
+        <td class="px-5 py-3 text-right">
+          <a href="/admin/users/{{ u.id }}" class="text-ios-blue text-sm font-medium hover:underline">详情</a>
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">无匹配用户</td></tr>
+      <tr><td colspan="7" class="px-5 py-12 text-center text-ios-label3">无匹配用户</td></tr>
       {% endfor %}
     </tbody>
   </table>
   {% if total > per_page %}
-  <div class="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
-    <div class="text-slate-500">共 {{ total }} 条</div>
+  <div class="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-slate-700 text-sm">
+    <div class="text-ios-label3">第 {{ page }} 页 · 共 {{ total }} 条</div>
     <div class="flex gap-2">
-      {% if page > 1 %}<a href="?q={{ q }}&status={{ status }}&page={{ page - 1 }}" class="btn-sec text-xs">上一页</a>{% endif %}
-      {% if page * per_page < total %}<a href="?q={{ q }}&status={{ status }}&page={{ page + 1 }}" class="btn-sec text-xs">下一页</a>{% endif %}
+      {% if page > 1 %}<a href="?q={{ q }}&status={{ status }}&page={{ page - 1 }}" class="apple-btn-sec text-xs">← 上一页</a>{% endif %}
+      {% if page * per_page < total %}<a href="?q={{ q }}&status={{ status }}&page={{ page + 1 }}" class="apple-btn-sec text-xs">下一页 →</a>{% endif %}
     </div>
   </div>
   {% endif %}
