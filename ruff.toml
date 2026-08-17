@@ -1,0 +1,29 @@
+# Ruff 配置。
+#
+# 存在的理由：没有配置文件时，ruff 的规则集跟着版本走。
+# CI 里 `ruff>=0.6` 装的是最新版，某次升级就可能突然多出几百条存量告警
+# 把构建卡死 —— 这不是代码变差了，只是 linter 换了默认值。
+# 实际踩过：tests/ 首次进仓库那次 CI 直接报了 476 条。
+#
+# 这里显式钉住 ruff 官方的默认集（E4/E7/E9/F），意图是「只卡新问题」：
+# 语法错、未定义名、未使用导入这类真 bug 拦住，风格类的不阻塞。
+#
+# F821（未定义名）尤其重要：它在纯 Python 下往往只是运行不到的
+# NameError，但 cythonize 时是编译错误，会让打包出的镜像里
+# 一个 .so 都没有、全量源码明文发出去。这条必须留着。
+
+target-version = "py313"
+line-length = 88
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+# 存量问题，暂不阻塞（新代码请避免）：
+#   E402 import 不在文件顶部 —— conftest 要先设环境变量再 import app
+#   E701/E702 单行多语句 —— 存量紧凑写法
+#   E712 == True 比较 —— SQLAlchemy 过滤条件的历史写法
+ignore = ["E402", "E701", "E702", "E712"]
+
+[lint.per-file-ignores]
+# 测试里 import 了但只在 fixture/字符串里用到的，不值得为此改结构
+"tests/conftest.py" = ["F401"]

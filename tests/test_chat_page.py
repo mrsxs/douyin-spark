@@ -2,7 +2,6 @@
 
 首屏必须纯读冷备 —— 和联系人页同一条红线：碰网络就是 5~20 秒白屏。
 """
-from datetime import datetime, timedelta
 
 import pytest
 

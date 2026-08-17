@@ -6,7 +6,7 @@
 """
 import pytest
 
-from app import ai_reply_config, knowledge_service as kb
+from app import ai_reply_config
 from app.models import DouyinAccount, KnowledgeEntry
 
 

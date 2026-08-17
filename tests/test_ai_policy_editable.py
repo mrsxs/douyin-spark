@@ -10,7 +10,6 @@ ai_reply.py 里，页面上既看不到也改不了，而它恰恰是最需要�
    模型对借钱、要微信也会照回不误；
 3. 接口把默认原文吐给界面，保证「看到的」就是「发出去的」。
 """
-import pytest
 
 from app import ai_reply, ai_reply_config
 from app.models import AiReplyPeer

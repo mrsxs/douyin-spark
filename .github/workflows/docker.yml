@@ -31,8 +31,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Lint（只卡新问题，存量 E402/E702/E712 暂不阻塞）
-        run: ruff check app/ tests/ run.py --ignore E402,E702,E712,E701
+      - name: Lint（规则集钉在 ruff.toml，不随 ruff 版本漂移）
+        run: ruff check app/ tests/ run.py
 
       - name: 测试
         run: pytest -q
