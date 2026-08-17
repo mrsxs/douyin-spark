@@ -1,89 +1,147 @@
 {% extends "base.html" %}
 {% block title %}运行 #{{ run.id }} · {{ acc.label }}{% endblock %}
 {% block content %}
-<div class="mb-6">
-  <div class="text-sm text-slate-500">
-    <a href="/accounts/{{ acc.id }}" class="hover:underline">← {{ acc.nickname or acc.label }}</a>
-    · <a href="/accounts/{{ acc.id }}/runs" class="hover:underline">运行历史</a>
+
+<div class="flex items-center gap-3 mb-5">
+  <a href="/accounts/{{ acc.id }}/runs"
+     class="shrink-0 w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2"
+     aria-label="返回">
+    <iconify-icon icon="lucide:arrow-left" width="18" height="18"></iconify-icon>
+  </a>
+  <div class="min-w-0">
+    <h1 class="text-xl font-bold text-ios-label dark:text-slate-100">运行 #{{ run.id }}</h1>
+    <p class="text-xs text-ios-label3 truncate">{{ acc.nickname or acc.label }} · 运行历史</p>
   </div>
-  <h1 class="text-2xl font-bold mt-1">运行 #{{ run.id }}</h1>
+  <span class="ml-auto shrink-0">
+    {% if run.status == "running" %}
+      <span class="apple-chip-tint">
+        <iconify-icon icon="lucide:loader-2" width="11" height="11" class="animate-spin"></iconify-icon>运行中
+      </span>
+    {% elif run.status == "done" %}
+      <span class="apple-chip-green"><iconify-icon icon="lucide:check" width="11" height="11"></iconify-icon>完成</span>
+    {% else %}
+      <span class="apple-chip-red"><iconify-icon icon="lucide:x" width="11" height="11"></iconify-icon>{{ run.status }}</span>
+    {% endif %}
+  </span>
 </div>
 
-<div class="card p-5 mb-6">
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+<!-- 概览 -->
+<div class="apple-card-solid p-4 sm:p-5 mb-4">
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
     <div>
-      <div class="text-xs text-slate-500 uppercase">类型</div>
-      <div class="font-medium mt-1">
-        {% if run.kind == "auto" %}自动
-        {% elif run.kind == "manual_single" %}单发
-        {% elif run.kind == "manual_batch" %}批量
+      <div class="text-xs text-ios-label3">类型</div>
+      <div class="font-semibold mt-1 text-ios-label dark:text-slate-100">
+        {% if run.kind == "auto" %}自动续火花
+        {% elif run.kind == "manual_single" %}单条发送
+        {% elif run.kind == "manual_batch" %}批量发送
         {% else %}{{ run.kind }}{% endif %}
-        <span class="text-xs text-slate-500">· {{ run.triggered_by }}</span>
+      </div>
+      <div class="text-xs text-ios-label3 mt-0.5">{{ run.triggered_by }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-ios-label3">开始</div>
+      <div class="font-semibold mt-1 font-mono text-xs text-ios-label dark:text-slate-100">
+        {{ run.started_at.strftime("%m-%d %H:%M:%S") }}
       </div>
     </div>
     <div>
-      <div class="text-xs text-slate-500 uppercase">开始</div>
-      <div class="font-medium mt-1">{{ run.started_at.strftime("%Y-%m-%d %H:%M:%S") }}</div>
-    </div>
-    <div>
-      <div class="text-xs text-slate-500 uppercase">完成</div>
-      <div class="font-medium mt-1">
-        {% if run.finished_at %}{{ run.finished_at.strftime("%H:%M:%S") }}
-        ({{ ((run.finished_at - run.started_at).total_seconds() | int) }}s)
-        {% else %}运行中...{% endif %}
+      <div class="text-xs text-ios-label3">耗时</div>
+      <div class="font-semibold mt-1 text-ios-label dark:text-slate-100">
+        {% if run.finished_at %}{{ ((run.finished_at - run.started_at).total_seconds() | int) }}s
+        {% else %}<span class="text-ios-tint">进行中…</span>{% endif %}
       </div>
     </div>
     <div>
-      <div class="text-xs text-slate-500 uppercase">结果</div>
-      <div class="font-medium mt-1">
-        <span class="text-emerald-600 dark:text-emerald-400">✓ {{ run.sent }}</span>
-        {% if run.skipped %} · <span class="text-slate-500">跳过 {{ run.skipped }}</span>{% endif %}
-        {% if run.failed %} · <span class="text-rose-600 dark:text-rose-400">✗ {{ run.failed }}</span>{% endif %}
+      <div class="text-xs text-ios-label3">结果</div>
+      <div class="font-semibold mt-1 flex items-center gap-2 flex-wrap">
+        <span class="text-ios-green">✓{{ run.sent }}</span>
+        {% if run.skipped %}<span class="text-ios-label3">跳过{{ run.skipped }}</span>{% endif %}
+        {% if run.failed %}<span class="text-ios-red">✗{{ run.failed }}</span>{% endif %}
       </div>
     </div>
   </div>
+
+  {% if run.total %}
+  {% set pct = ((run.sent + run.failed) / run.total * 100) | round(0) | int %}
+  <div class="mt-4">
+    <div class="w-full bg-ios-fill3 dark:bg-slate-700 rounded-full h-1.5 overflow-hidden">
+      <div class="h-1.5 rounded-full {% if run.status == 'error' %}bg-ios-red{% elif run.status == 'done' %}bg-ios-green{% else %}bg-ios-tint{% endif %}"
+           style="width: {{ pct if pct <= 100 else 100 }}%"></div>
+    </div>
+    <div class="text-xs text-ios-label3 mt-1">{{ run.sent + run.failed }} / {{ run.total }}</div>
+  </div>
+  {% endif %}
+
   {% if run.error %}
-  <div class="mt-4 p-3 rounded bg-rose-50 dark:bg-rose-900/20 text-sm text-rose-700 dark:text-rose-400 font-mono whitespace-pre-wrap">{{ run.error }}</div>
+  <div class="mt-4 p-3 rounded-xl bg-ios-redBg dark:bg-rose-900/20 text-xs text-rose-700 dark:text-rose-400 font-mono whitespace-pre-wrap break-all">{{ run.error }}</div>
   {% endif %}
 </div>
 
-<div class="card overflow-hidden">
-  <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700 font-semibold">发送明细（{{ items|length }}）</div>
+<!-- 明细 -->
+<div class="apple-card-solid overflow-hidden">
+  <div class="px-4 sm:px-5 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
+    <iconify-icon icon="lucide:list" width="16" height="16" class="text-ios-label2"></iconify-icon>
+    <span class="font-semibold text-ios-label dark:text-slate-100">发送明细</span>
+    <span class="apple-chip-gray ml-auto">{{ items | length }}</span>
+  </div>
+
   {% if items %}
-  <table class="w-full">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+  <!-- 手机：卡片 -->
+  <div class="divide-y divide-slate-100 dark:divide-slate-700 sm:hidden">
+    {% for it in items %}
+    <div class="p-4">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="font-medium text-ios-label dark:text-slate-100 truncate">{{ it.nickname or it.uid }}</div>
+          <div class="text-[11px] text-ios-label3 truncate">{{ it.uid }} · {{ it.sent_at.strftime("%H:%M:%S") }}</div>
+        </div>
+        <span class="shrink-0 {% if it.ok %}apple-chip-green{% else %}apple-chip-red{% endif %}">
+          {% if it.ok %}✓{% else %}✗{% endif %}
+        </span>
+      </div>
+      {% if it.message %}
+      <div class="mt-2 text-sm text-ios-label dark:text-slate-200 break-all">{{ it.message }}</div>
+      {% endif %}
+      <div class="mt-1 text-[11px] text-ios-label3 font-mono break-all">{{ it.detail }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- 桌面：表格 -->
+  <table class="w-full hidden sm:table">
+    <thead class="bg-ios-fill2 dark:bg-slate-700/30 text-xs text-ios-label3 font-medium">
       <tr>
-        <th class="px-4 py-2 text-left w-32">时间</th>
-        <th class="px-4 py-2 text-left">联系人</th>
-        <th class="px-4 py-2 text-center w-16">结果</th>
-        <th class="px-4 py-2 text-left">消息 / 详情</th>
+        <th class="px-4 py-2.5 text-left w-24">时间</th>
+        <th class="px-4 py-2.5 text-left w-56">联系人</th>
+        <th class="px-4 py-2.5 text-center w-16">结果</th>
+        <th class="px-4 py-2.5 text-left">消息 / 详情</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
       {% for it in items %}
-      <tr>
-        <td class="px-4 py-2 text-xs text-slate-500">{{ it.sent_at.strftime("%H:%M:%S") }}</td>
-        <td class="px-4 py-2">
-          <div class="font-medium">{{ it.nickname or it.uid }}</div>
-          <div class="text-xs text-slate-500">{{ it.uid }}</div>
+      <tr class="hover:bg-ios-fill2/40 dark:hover:bg-slate-700/20">
+        <td class="px-4 py-2.5 text-xs text-ios-label3 font-mono">{{ it.sent_at.strftime("%H:%M:%S") }}</td>
+        <td class="px-4 py-2.5">
+          <div class="font-medium text-sm text-ios-label dark:text-slate-100 truncate">{{ it.nickname or it.uid }}</div>
+          <div class="text-[11px] text-ios-label3">{{ it.uid }}</div>
         </td>
-        <td class="px-4 py-2 text-center">
-          {% if it.ok %}
-            <span class="pill pill-green">✓</span>
-          {% else %}
-            <span class="pill pill-rose">✗</span>
-          {% endif %}
+        <td class="px-4 py-2.5 text-center">
+          <span class="{% if it.ok %}apple-chip-green{% else %}apple-chip-red{% endif %}">
+            {% if it.ok %}✓{% else %}✗{% endif %}
+          </span>
         </td>
-        <td class="px-4 py-2 text-xs">
-          {% if it.message %}<div class="text-slate-900 dark:text-slate-100 mb-1">{{ it.message }}</div>{% endif %}
-          <div class="text-slate-500 font-mono break-all">{{ it.detail }}</div>
+        <td class="px-4 py-2.5 text-xs">
+          {% if it.message %}<div class="text-ios-label dark:text-slate-100 mb-1 break-all">{{ it.message }}</div>{% endif %}
+          <div class="text-ios-label3 font-mono break-all">{{ it.detail }}</div>
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% else %}
-  <div class="p-8 text-center text-slate-500">无发送明细（可能全部联系人都被跳过）</div>
+  <div class="p-10 text-center text-sm text-ios-label3">
+    无发送明细（可能全部联系人都被跳过，或任务刚开始）
+  </div>
   {% endif %}
 </div>
 {% endblock %}

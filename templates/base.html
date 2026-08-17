@@ -189,7 +189,8 @@
                  await this.load();
                }
              }"
-             @click.outside="open=false">
+             @click.outside="open=false"
+             @open-notifications.window="open=true; load()">
           <button @click="open=!open; if(open) load()" class="btn-ghost relative" title="通知"
                   aria-label="通知" aria-haspopup="menu" :aria-expanded="open">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
@@ -197,7 +198,8 @@
                   class="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] leading-none min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1"></span>
           </button>
           <div x-show="open" x-transition x-cloak
-               class="absolute right-0 mt-2 w-96 max-h-[70vh] overflow-y-auto bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-slate-200 dark:ring-slate-700">
+               class="fixed inset-x-2 top-16 md:absolute md:inset-x-auto md:right-0 md:top-auto md:mt-2 md:w-96
+                      max-h-[70vh] overflow-y-auto bg-white dark:bg-slate-800 rounded-xl shadow-lg ring-1 ring-slate-200 dark:ring-slate-700 z-40">
             <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
               <div class="font-medium text-sm">通知 <span x-show="unread>0" x-text="'('+unread+'未读)'" class="text-xs text-rose-500"></span></div>
               <button type="button" @click="markAll()" x-show="unread>0"
@@ -272,9 +274,11 @@
   </template>
 </div>
 
-<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 pb-24 md:pb-8">
   {% block content %}{% endblock %}
 </main>
+
+{% if user %}{% include '_mobile_nav.html' %}{% endif %}
 
 {% block scripts %}{% endblock %}
 

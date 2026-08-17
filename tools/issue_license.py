@@ -50,7 +50,8 @@ def main():
                    choices=["basic", "pro", "enterprise"],
                    help="License 等级（basic/pro/enterprise）")
     p.add_argument("--machine", default=None,
-                   help="机器码（可选，绑定后该 License 只能在此机器运行；启动时 LICENSE_STRICT=1 才生效）")
+                   help="机器码（可选，绑定后该 License 只能在此机器运行；"
+                        "绑定后校验无条件生效，客户无法用环境变量关闭）")
     p.add_argument("--note", default="", help="客户备注（只卖家可见，显示在启动日志）")
     p.add_argument("-q", "--quiet", action="store_true", help="只输出 license key，不打印 payload 预览")
     args = p.parse_args()

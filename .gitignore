@@ -43,11 +43,10 @@ venv/
 *.douyin_config.json
 *.douyin_logs/
 
-# 调试输出
+# 调试输出（只匹配仓库根目录，别误伤 tests/ 下的正式测试）
 /tmp_*
-debug_*.py
-test_*.py
-fetch_security.py
+/debug_*.py
+/test_*.py
 
 # macOS
 .DS_Store

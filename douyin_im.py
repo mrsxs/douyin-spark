@@ -74,9 +74,16 @@ def _account_dir() -> str:
 
 
 # ── 兼容老 CLI 的遗留函数（web 层不再使用）──
+
+# 老 CLI 的默认账户名。原来只有 `--help` 文案和 `--list-accounts` 引用这个名字，
+# 却从没定义过：纯 Python 下这两条分支一跑就 NameError（平时走不到，没人发现），
+# 而 cythonize 时是编译错误，会让整个 .so 编不出来。
+_DEFAULT_ACCOUNT = "default"
+
+
 def set_account(account: str):
     """【遗留】按账户名切换（老 CLI 用）"""
-    os.environ["DOUYIN_ACCOUNT"] = account or "default"
+    os.environ["DOUYIN_ACCOUNT"] = account or _DEFAULT_ACCOUNT
     set_account_ctx(None)
 
 
@@ -1166,6 +1173,46 @@ def qr_login(headless: bool = False, qr_sink=None, on_logged_in=None,
     return s
 
 
+def _normalize_mobile(raw: str) -> str:
+    """规范化国内手机号；非法直接抛 ValueError。
+
+    早点拦住比让浏览器空跑 20 秒再报「未检测到发码提示」强得多。
+    """
+    s = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if s.startswith("86") and len(s) == 13:
+        s = s[2:]
+    if len(s) != 11 or not s.startswith("1"):
+        raise ValueError("手机号格式不正确（应为 11 位国内手机号）")
+    return s
+
+
+# 发码后页面上可能出现的滑块 / 验证弹窗特征
+_CAPTCHA_HINTS = ("captcha", "验证码验证", "拖动滑块", "完成安全验证",
+                  "请完成验证", "安全验证")
+
+
+def _classify_send_state(has_countdown: bool, has_captcha: bool,
+                         error_text: str = "") -> tuple[str, str]:
+    """判断「获取验证码」点下去之后到底发出没有。
+
+    Why: 原实现等不到倒计时就只打印一句警告继续走，还照样通知前端
+    「已发送」—— 弹了滑块时短信根本没发出，用户只能盯着假的成功提示干等。
+
+    返回 (state, 用户可读消息)，state ∈ {sent, captcha, failed}。
+    """
+    if has_countdown:
+        return "sent", "验证码已发送"
+    if has_captcha:
+        return ("captcha",
+                "抖音弹出了安全验证（滑块），短信未发出。"
+                "请稍后重试，或改用扫码登录。")
+    if error_text:
+        return "failed", f"发送验证码失败：{error_text.strip()[:80]}"
+    return ("failed",
+            "未能确认验证码是否发出（可能被风控或手机号有误）。"
+            "请稍后重试，或改用扫码登录。")
+
+
 def sms_login_browser(mobile: str, headless: bool = True,
                       send_sink=None, code_provider=None, on_logged_in=None) -> requests.Session:
     """短信验证码登录 — Playwright 驱动浏览器（避开纯 HTTP 的 msToken/滑块问题）。
@@ -1181,11 +1228,7 @@ def sms_login_browser(mobile: str, headless: bool = True,
     except ImportError:
         raise RuntimeError("未安装 Playwright，请先 pip install playwright && python3 -m playwright install chromium")
 
-    mobile = (mobile or "").lstrip("+").replace(" ", "").strip()
-    if mobile.startswith("86") and len(mobile) > 11:
-        mobile = mobile[2:]
-    if not mobile:
-        raise RuntimeError("手机号为空")
+    mobile = _normalize_mobile(mobile)
 
     captured_nicks: dict = {}
     with sync_playwright() as p:
@@ -1212,12 +1255,36 @@ def sms_login_browser(mobile: str, headless: bool = True,
         page.get_by_placeholder("请输入手机号").first.fill(mobile, timeout=10000)
         # 点「获取验证码」
         page.get_by_text("获取验证码", exact=True).first.click(timeout=8000)
-        # 等待已发码（按钮变「xx s后重新发送」）；若弹滑块则人/失败
+
+        # 判定到底发出没有 —— 不能等不到就假装成功
+        has_countdown = False
         try:
             page.wait_for_selector("text=后重新发送", timeout=20000)
-            print("  验证码已发送")
+            has_countdown = True
         except Exception:
-            print("  警告: 未检测到发码成功提示（可能弹了滑块）")
+            pass
+
+        has_captcha = False
+        error_text = ""
+        if not has_countdown:
+            try:
+                body = (page.inner_text("body", timeout=3000) or "")
+                has_captcha = any(h in body for h in _CAPTCHA_HINTS)
+                for line in body.splitlines():
+                    line = line.strip()
+                    if any(w in line for w in ("频繁", "错误", "失败", "不正确", "稍后")):
+                        error_text = line
+                        break
+            except Exception:
+                pass
+
+        state, msg = _classify_send_state(has_countdown, has_captcha, error_text)
+        _log(f"[sms] 发码结果: {state} — {msg}", "SMS")
+        if state != "sent":
+            browser.close()
+            raise RuntimeError(msg)
+
+        print("  验证码已发送")
         if send_sink is not None:
             try: send_sink()
             except Exception: pass
@@ -1609,6 +1676,357 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
 
     # active 在前、broken 在后，各自按天数倒序
     return sorted(result, key=lambda x: (x["status"] != "active", -x["days"]))
+
+
+# ── 聊天消息解析 ──────────────────────────────────────────────────────
+#
+# get_message_by_init 的响应里本来就带着每个会话最近 ~21 条消息，
+# 而拉联系人已经打过这个接口了 —— 直接从同一份响应里解析，
+# 不额外请求抖音（多一个接口就多一份风控风险）。
+#
+# 字段号来自对真实响应的实测：
+#   f1=conversation_id  f2=conversation_type  f3=server_message_id
+#   f5=conversation_short_id  f6=message_type  f7=sender(uid)
+#   f8=content(JSON)          f10=create_time(ms)
+#
+# 注意 f3/f5 别搞反：f5 在整个会话里是同一个值，拿它当消息主键会把
+# 一个会话的 21 条消息去重成 1 条。语义由 _parse_conv_info 交叉验证过。
+
+_MSG_KINDS: dict[int, str] = {
+    7: "text",
+    27: "image",
+    17: "audio", 109: "audio",
+    5: "emoji",
+    1: "system", 15: "system",
+    8: "share", 77: "share", 105: "share", 110: "share",
+}
+
+_KIND_PLACEHOLDER: dict[str, str] = {
+    "image": "[图片]", "audio": "[语音]", "emoji": "[表情]",
+    "share": "[分享]", "other": "[消息]",
+}
+
+# 分享摘要的长度上限。抖音的视频文案能有上千字（整篇小作文），
+# 原样塞进聊天气泡会把整屏顶满，聊天记录没法看。
+_SHARE_MAX = 120
+
+# 抖音图片的签名域名（p3-pc-sign / p26-sign 之类），URL 带 x-expires，
+# 十来天后就 403。换成同源常规域名后长期有效 —— 头像栽过一次的坑。
+_SIGN_HOST_RE = re.compile(r"^(https?://p\d+(?:-pc)?)-sign(\.douyinpic\.com/)",
+                           re.I)
+# 视频 id 会拼进播放器 URL，只放行纯数字
+_VID_RE = re.compile(r"^\d{1,32}$")
+
+
+def normalize_media_url(url: str | None) -> str:
+    """把抖音图片 URL 规范化成长期可访问的形式；非 http(s) 一律丢弃。
+
+    - 去掉域名里的 -sign（签名域名会过期，403）
+    - 去掉 x-expires / x-signature 这类时效参数
+    - 只放行 http/https：这些 URL 直接进 <img src>，
+      javascript: / data: 混进来就是一个 XSS 入口
+
+    ⚠ 只适用于头像。视频封面不能这么处理 —— 实测 14 条封面里
+    去签名后只有 6 条还能访问（tos-cn-i-dy、*c001 这些桶必须带签名），
+    封面走 safe_media_url。
+    """
+    u = _http_only(url)
+    if not u:
+        return ""
+    normalized = _SIGN_HOST_RE.sub(r"\1\2", u)
+    if normalized != u or "douyinpic.com" in u.lower():
+        normalized = normalized.split("?", 1)[0]
+    return normalized
+
+
+def _http_only(url) -> str:
+    """只放行 http(s)，其余（javascript: / data: / 协议相对）一律丢弃。"""
+    u = url.strip() if isinstance(url, str) else ""
+    return u if u and re.match(r"^https?://", u, re.I) else ""
+
+
+def safe_media_url(url: str | None) -> str:
+    """视频封面/原图：只做协议校验，原样保留签名。
+
+    实测签名 URL 14/14 可用、去签名只有 6/14，所以封面必须留签名。
+    代价是签名有 x-expires（多数一年，少数十来天），过期后前端回退到
+    去签名版本（见 _media 的 cover_alt）。
+    """
+    return _http_only(url)
+
+
+def _first_url(node) -> str:
+    """从抖音的 {uri, url_list:[...]} 结构里取第一个可用 URL（保留签名）。"""
+    if not isinstance(node, dict):
+        return ""
+    for key in ("large_url_list", "url_list"):
+        lst = node.get(key)
+        if isinstance(lst, list):
+            for item in lst:
+                url = safe_media_url(item)
+                if url:
+                    return url
+    return ""
+
+
+def _cover_pair(node) -> tuple[str, str]:
+    """返回 (签名封面, 去签名兜底)。
+
+    签名版现在 100% 能用但有 x-expires；去签名版不过期却只有约四成可用。
+    两个都给前端，签名的 403 了就自动回退。
+    """
+    signed = _first_url(node)
+    if not signed:
+        return "", ""
+    alt = normalize_media_url(signed)
+    return signed, ("" if alt == signed else alt)
+
+
+def _media(kind: str, content: dict) -> dict | None:
+    """抽出可内嵌的媒体：分享视频给封面 + 视频 id，图片给原图。
+
+    拿不到任何可展示的东西就返回 None —— 前端据此决定画不画卡片。
+    """
+    if kind == "image":
+        cover, alt = _cover_pair(content.get("resource_url"))
+        if not cover:
+            return None
+        out = {"kind": "image", "cover": cover, "cover_alt": alt, "vid": ""}
+        for src, dst in (("cover_width", "width"), ("cover_height", "height")):
+            v = content.get(src)
+            if isinstance(v, int) and 0 < v < 100000:
+                out[dst] = v
+        return out
+
+    if kind != "share":
+        return None
+
+    # 110 有时把 item_id / cover 藏在 aweme_info 里
+    info = content.get("aweme_info")
+    info = info if isinstance(info, dict) else {}
+
+    vid = ""
+    for src in (content, info):
+        for key in ("item_id", "itemId", "aweme_id"):
+            v = src.get(key)
+            if isinstance(v, (str, int)) and not isinstance(v, bool) \
+                    and _VID_RE.match(str(v)):
+                vid = str(v)
+                break
+        if vid:
+            break
+
+    cover, alt = _cover_pair(content.get("cover_url"))
+    if not cover:
+        cover, alt = _cover_pair(info.get("cover_url"))
+    if not vid and not cover:
+        return None
+    return {"kind": "video", "cover": cover, "cover_alt": alt, "vid": vid}
+
+
+def _pb_fields(data: bytes) -> list[tuple[int, int, object]] | None:
+    """把一段 bytes 当 protobuf 逐字段解析。不像是 protobuf 就返回 None。
+
+    这里刻意宽松：抖音随时可能加字段，遇到不认识的整段放弃比抛异常好。
+    """
+    out: list[tuple[int, int, object]] = []
+    pos = 0
+    n = len(data)
+    while pos < n:
+        try:
+            tag, pos = _read_vi(data, pos)
+        except (IndexError, ValueError):
+            return None
+        field, wire = tag >> 3, tag & 0x7
+        # field 0 不合法；字段号过大基本可以断定不是 protobuf（是字符串/图片字节）
+        if field == 0 or field > 50000:
+            return None
+        try:
+            if wire == 0:
+                val, pos = _read_vi(data, pos)
+            elif wire == 2:
+                length, pos = _read_vi(data, pos)
+                if length < 0 or pos + length > n:
+                    return None
+                val = data[pos:pos + length]
+                pos += length
+            elif wire == 5:
+                if pos + 4 > n:
+                    return None
+                val = data[pos:pos + 4]
+                pos += 4
+            elif wire == 1:
+                if pos + 8 > n:
+                    return None
+                val = data[pos:pos + 8]
+                pos += 8
+            else:
+                return None
+        except (IndexError, ValueError):
+            return None
+        out.append((field, wire, val))
+    return out
+
+
+def _first_fields(fields: list[tuple[int, int, object]]) -> dict[int, tuple[int, object]]:
+    """字段号 → (wire, value)，重复字段取第一个。"""
+    out: dict[int, tuple[int, object]] = {}
+    for field, wire, val in fields:
+        if field not in out:
+            out[field] = (wire, val)
+    return out
+
+
+def _is_message(head: dict[int, tuple[int, object]]) -> bool:
+    """判断这层结构是不是一条 Message。
+
+    条件取自实测：f1 是 `0:` 开头的会话 id，f6/f7 是 varint，f8 是内容。
+    卡死这四个才不会把会话摘要、用户资料块之类误判成消息。
+    """
+    if 1 not in head or head[1][0] != 2:
+        return False
+    try:
+        conv_id = head[1][1].decode("ascii")          # type: ignore[union-attr]
+    except (UnicodeDecodeError, AttributeError):
+        return False
+    if not conv_id.startswith("0:"):
+        return False
+    return (6 in head and head[6][0] == 0
+            and 7 in head and head[7][0] == 0
+            and 8 in head and head[8][0] == 2)
+
+
+def _s(content: dict, key: str) -> str:
+    """取字符串字段。抖音偶尔把这些字段给成 dict/list/数字，直接 .strip() 会炸。"""
+    v = content.get(key)
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _share_label(content: dict) -> str:
+    """分享类消息的一行摘要。
+
+    字段优先级来自实测：
+      105（视频评论分享）→ aweme_title + comment
+      8 / 77（视频、用户名片）→ content_title / content_name
+      110（分享视频）→ description，常常只有「[分享视频]」
+    只看 description/content_name 的话，105 这类会全变成裸「[分享]」。
+    """
+    title = (_s(content, "aweme_title") or _s(content, "content_title")
+             or _s(content, "content_name"))
+    desc = _s(content, "description")
+    label = title or desc or _KIND_PLACEHOLDER["share"]
+    comment = _s(content, "comment")
+    if comment:
+        # 分享的是「别人的评论」，评论正文才是重点
+        label = comment if label == _KIND_PLACEHOLDER["share"] else f"{label}：{comment}"
+    # 换行会把气泡撑成一大片，压成一行再截断
+    label = " ".join(label.split())
+    if len(label) > _SHARE_MAX:
+        label = label[:_SHARE_MAX] + "…"
+    return label
+
+
+def _audio_label(content: dict) -> str:
+    """语音带上时长 —— 只显示「[语音]」的话，3 秒和 60 秒看起来一模一样。"""
+    ms = content.get("duration")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms > 0:
+        return f"{_KIND_PLACEHOLDER['audio']} {ms / 1000:.1f}″"
+    return _KIND_PLACEHOLDER["audio"]
+
+
+def _summarize(kind: str, content: dict) -> str:
+    """把各类消息压成一行可读文字 —— 聊天列表里要能扫一眼看懂。"""
+    if kind == "text":
+        return (content.get("text") or "").strip() if isinstance(
+            content.get("text"), str) else ""
+    if kind == "system":
+        return _s(content, "tips") or _s(content, "hint_text")
+    if kind == "share":
+        return _share_label(content)
+    if kind == "audio":
+        return _audio_label(content)
+    return _KIND_PLACEHOLDER.get(kind, _KIND_PLACEHOLDER["other"])
+
+
+def _peer_of(conv_id: str, my_uid: str) -> str:
+    """从 `0:1:a:b` 里取出对方 uid。不是单聊返回 ''。"""
+    parts = conv_id.split(":")
+    if len(parts) != 4 or not (parts[2].isdigit() and parts[3].isdigit()):
+        return ""
+    if my_uid and parts[3] == my_uid:
+        return parts[2]
+    return parts[3]
+
+
+def parse_messages(resp_bytes: bytes, my_uid: str = "") -> list[dict]:
+    """从 get_message_by_init 响应里解析出聊天消息，按时间正序。
+
+    my_uid 用来判断收发方向；拿不到时全部当对方发的（is_me=False）。
+    任何解析异常都只跳过那一条，绝不让整个会话读不出来。
+    """
+    found: list[dict] = []
+    seen: set = set()
+
+    def walk(data: bytes, depth: int) -> None:
+        if depth > 8 or len(data) < 8:
+            return
+        fields = _pb_fields(data)
+        if fields is None:
+            return
+        head = _first_fields(fields)
+        if _is_message(head):
+            _collect(head, fields)
+            return
+        for _field, wire, val in fields:
+            if wire == 2:
+                walk(val, depth + 1)               # type: ignore[arg-type]
+
+    def _collect(head: dict, fields: list) -> None:
+        try:
+            conv_id = head[1][1].decode("ascii")
+            peer = _peer_of(conv_id, my_uid)
+            if not peer:                            # 群聊/异常会话，跳过
+                return
+            msg_id = head[3][1] if 3 in head and head[3][0] == 0 else 0
+            key = msg_id or (conv_id, head[10][1] if 10 in head else 0,
+                             bytes(head[8][1])[:64])
+            if key in seen:
+                return
+            seen.add(key)
+
+            raw = head[8][1]
+            try:
+                content = json.loads(raw.decode("utf-8", errors="replace"))
+                if not isinstance(content, dict):
+                    content = {}
+            except (ValueError, AttributeError):
+                content = {}
+
+            mtype = head[6][1]
+            kind = _MSG_KINDS.get(mtype, "other")
+            sender = str(head[7][1])
+            found.append({
+                "conv_id": conv_id,
+                "peer_uid": peer,
+                "server_msg_id": msg_id,
+                "conv_short_id": head[5][1] if 5 in head and head[5][0] == 0 else 0,
+                "msg_type": mtype,
+                "kind": kind,
+                "sender": sender,
+                "is_me": bool(my_uid) and sender == my_uid,
+                "text": _summarize(kind, content) or _KIND_PLACEHOLDER["other"],
+                "media": _media(kind, content),
+                "created_at": head[10][1] if 10 in head and head[10][0] == 0 else 0,
+            })
+        except Exception:
+            return
+
+    try:
+        walk(resp_bytes, 0)
+    except RecursionError:
+        print("[messages] 响应嵌套过深，已截断解析")
+    found.sort(key=lambda m: (m["created_at"], m["server_msg_id"]))
+    return found
 
 
 def _is_group_uid(uid: str, cached_nicks: dict) -> bool:
@@ -2262,7 +2680,10 @@ def main():
 
     if args.account:
         set_account(args.account)
-        print(f"使用账户: {_current_account}")
+        # 这里原本打的是 `_current_account`，而那个名字全文件都没定义过 ——
+        # 纯 Python 下走到这条 CLI 分支才会 NameError（平时走不到所以没人发现），
+        # 但 cythonize 时它是编译错误，会让整个 .so 编译失败。
+        print(f"使用账户: {args.account}")
 
     if args.auto:       mode = "auto"
     elif args.list:     mode = "list"

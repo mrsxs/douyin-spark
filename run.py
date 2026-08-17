@@ -3,15 +3,14 @@
 启动入口：python3 run.py [--host HOST] [--port PORT]
 """
 import argparse
-import os
 import uvicorn
 
 
 def main():
-    # License 检查（容器/生产环境强校验；设 SKIP_LICENSE_CHECK=1 跳过，仅供开发）
-    if os.environ.get("SKIP_LICENSE_CHECK") not in ("1", "true", "True"):
-        from app.license import verify_license_or_exit
-        verify_license_or_exit()
+    # License 校验统一走 app.license.license_gate()
+    # （app.main 的 lifespan 也会调一次，幂等；覆盖 CMD 绕开 run.py 同样挡得住）
+    from app.license import license_gate
+    license_gate()
 
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1")

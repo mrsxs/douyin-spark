@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import smtplib
-import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage

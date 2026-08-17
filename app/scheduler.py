@@ -6,11 +6,9 @@ DB 驱动的后台定时调度：每 30s 扫一遍，到点触发续火花。
 - 重复/并发触发通过 JobRun 状态判断（不再依赖 last_ran_date，该字段仅用于 UI 展示）
 - 错过整点那一分钟也能补跑（time_hhmm <= 当前时间且今日未 done）
 """
-import time
 import threading
 import traceback
-from datetime import datetime, date, timedelta
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 
 from .db import SessionLocal
 from .models import Schedule, DouyinAccount, User, JobRun
@@ -58,7 +56,6 @@ def _run_one(user_id: int, account_id: int):
 
 
 def _loop():
-    from sqlalchemy import or_, and_
     while not _STOP.is_set():
         try:
             now = datetime.now()                       # 容器本地时间（TZ=Shanghai）
@@ -264,8 +261,21 @@ def start():
         _health_thread = threading.Thread(target=_health_loop, daemon=True, name="health")
         _health_thread.start()
         print("[scheduler] cookies 健康检查已启动（每日 03:00）")
+    # AI 自动回复要 7x24 在线，而实时轮询默认是「最后一个浏览器关掉就停」。
+    # 这里给开着开关的账号重建常驻轮询，否则重启后自动回复就只在
+    # 有人打开聊天页时才活 —— 而用户以为它一直在。
+    try:
+        from . import ai_worker
+        ai_worker.resume_watchers()
+    except Exception as e:
+        print(f"[scheduler] 恢复 AI 自动回复失败: {e}")
 
 
 def stop():
     _STOP.set()
     _HEALTH_STOP.set()
+    try:
+        from . import ai_worker
+        ai_worker.stop()
+    except Exception:
+        pass

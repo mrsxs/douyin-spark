@@ -1,14 +1,16 @@
 {% extends "admin/_layout.html" %}
 {% set active_nav = "home" %}
 {% block page_title %}概览{% endblock %}
-{% block page_subtitle %}{{ admin.username }} · 超级管理员 · 系统运行正常{% endblock %}
+{% block page_subtitle %}{{ admin.username }} · 超级管理员{% endblock %}
 {% block page_actions %}
-  <button class="w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2" title="搜索">
-    <iconify-icon icon="lucide:search" width="16" height="16"></iconify-icon>
-  </button>
-  <button class="w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2" title="通知">
-    <iconify-icon icon="lucide:bell" width="16" height="16"></iconify-icon>
-  </button>
+  <a href="/admin/users" class="apple-btn-sec !py-1.5 !px-3 text-xs">
+    <iconify-icon icon="lucide:users" width="14" height="14"></iconify-icon>
+    用户管理
+  </a>
+  <a href="/admin/codes" class="apple-btn-tint !py-1.5 !px-3 text-xs">
+    <iconify-icon icon="lucide:ticket" width="14" height="14"></iconify-icon>
+    签发授权码
+  </a>
 {% endblock %}
 
 {% block admin_content %}
@@ -16,12 +18,12 @@
 <!-- 4 Stats -->
 <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
   {% set sc = [
-    ("users",       "用户总数",   stats.users_total,  "blue",   "+" ~ stats.users_total ~ " 累计"),
-    ("badge-check", "活跃订阅",   stats.users_active, "green",  "活跃中"),
+    ("users",       "用户总数",     stats.users_total,  "blue",   "累计注册"),
+    ("badge-check", "活跃订阅",     stats.users_active, "green",  "未过期"),
     ("ticket",      "未使用授权码", stats.codes_unused, "tint",   stats.codes_total ~ " 张总计"),
-    ("activity",    "今日触发数", stats.runs_today,   "purple", "今日成功"),
+    ("activity",    "今日触发数",   stats.runs_today,   "purple", "今日自动续火花"),
   ] %}
-  {% for ic, label, value, tone, delta in sc %}
+  {% for ic, label, value, tone, hint in sc %}
   <div class="apple-card-solid p-5">
     <div class="flex items-center justify-between">
       <div class="text-sm text-ios-label2 dark:text-slate-300">{{ label }}</div>
@@ -30,44 +32,43 @@
       </div>
     </div>
     <div class="mt-3 text-3xl font-bold tracking-tight text-ios-label dark:text-slate-100">{{ value }}</div>
-    <div class="mt-1 flex items-center gap-1 text-xs">
-      <iconify-icon icon="lucide:trending-up" width="13" height="13" class="text-ios-green"></iconify-icon>
-      <span class="text-ios-green font-medium">{{ delta }}</span>
-    </div>
+    <div class="mt-1 text-xs text-ios-label3">{{ hint }}</div>
   </div>
   {% endfor %}
 </div>
 
-<!-- 图表行：用户增长柱状图 + 订阅状态环形图 -->
+<!-- 图表行：触发趋势柱状图 + 订阅状态环形图 -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
-  <!-- 用户增长柱状图（占 2 列） -->
+  <!-- 触发趋势（占 2 列）— 数据来自 JobRun 按日聚合 -->
   <div class="apple-card-solid p-5 lg:col-span-2">
     <div class="flex items-center justify-between mb-4">
       <div>
-        <div class="font-semibold text-ios-label dark:text-slate-100">用户增长趋势</div>
-        <div class="text-xs text-ios-label3 mt-0.5">最近 7 天新增触发记录</div>
+        <div class="font-semibold text-ios-label dark:text-slate-100">任务触发趋势</div>
+        <div class="text-xs text-ios-label3 mt-0.5">最近 7 天每日续火花任务数</div>
       </div>
-      <div class="ios-seg">
-        <button class="ios-seg-item on">周</button>
-        <button class="ios-seg-item">月</button>
+      <div class="text-xs text-ios-label3">
+        合计 <span class="font-semibold text-ios-label dark:text-slate-100">{{ trend | sum(attribute='value') }}</span> 次
       </div>
     </div>
-    {# 用 audit logs 按日聚合 — 这里前端用简化的虚拟数据，后端可扩展 #}
-    {% set bars = [
-      ("周一", 46), ("周二", 62), ("周三", 54),
-      ("周四", 78), ("周五", 91), ("周六", 70), ("周日", 58)
-    ] %}
-    {% set max_v = 100 %}
+    {% if trend_max > 0 %}
     <div class="h-56 flex items-end gap-3 sm:gap-4">
-      {% for label, v in bars %}
-      <div class="flex-1 flex flex-col items-center gap-2 h-full justify-end">
-        <span class="text-[11px] font-semibold text-ios-label3">{{ v }}</span>
-        <div class="w-full rounded-t-lg {% if v > 85 %}bg-ios-tint{% else %}bg-ios-tintBg{% endif %} transition-all"
-             style="height: {{ (v / max_v * 80)|int }}%;"></div>
-        <span class="text-[11px] text-ios-label3">{{ label }}</span>
+      {% for p in trend %}
+      <div class="flex-1 flex flex-col items-center gap-2 h-full justify-end"
+           title="{{ p.date }}：{{ p.value }} 次">
+        <span class="text-[11px] font-semibold text-ios-label3">{{ p.value }}</span>
+        <div class="w-full rounded-t-lg transition-all {% if p.value == trend_max %}bg-ios-tint{% else %}bg-ios-tintBg{% endif %}"
+             style="height: {{ (p.value / trend_max * 80) | round(1) }}%; min-height: {% if p.value %}4px{% else %}2px{% endif %};"></div>
+        <span class="text-[11px] text-ios-label3">{{ p.label }}</span>
       </div>
       {% endfor %}
     </div>
+    {% else %}
+    <div class="h-56 flex flex-col items-center justify-center text-center">
+      <iconify-icon icon="lucide:chart-column" width="32" height="32" class="text-ios-label3 mb-2"></iconify-icon>
+      <div class="text-sm text-ios-label2">最近 7 天还没有任务记录</div>
+      <div class="text-xs text-ios-label3 mt-1">用户启用定时续火花后这里会有数据</div>
+    </div>
+    {% endif %}
   </div>
 
   <!-- 订阅状态环形图 -->

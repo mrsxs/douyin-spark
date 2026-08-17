@@ -1,0 +1,86 @@
+{% extends "admin/_layout.html" %}
+{% set active_nav = "site" %}
+{% block page_title %}站点设置{% endblock %}
+{% block page_subtitle %}对外域名与销售入口{% endblock %}
+
+{% block admin_content %}
+
+{% if ok %}
+<div class="apple-card-solid p-3.5 mb-4 bg-ios-greenBg dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800">
+  <div class="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400">
+    <iconify-icon icon="lucide:circle-check" width="16" height="16"></iconify-icon>
+    已保存
+  </div>
+</div>
+{% endif %}
+{% if error %}
+<div class="apple-card-solid p-3.5 mb-4 bg-ios-redBg dark:bg-rose-900/20 border-rose-200 dark:border-rose-800">
+  <div class="flex items-center gap-2 text-sm text-rose-700 dark:text-rose-400">
+    <iconify-icon icon="lucide:triangle-alert" width="16" height="16"></iconify-icon>
+    {{ error }}
+  </div>
+</div>
+{% endif %}
+
+<form method="post" action="/admin/site" class="space-y-4 max-w-2xl">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <!-- 站点域名 -->
+  <div class="apple-card-solid p-5">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-9 h-9 rounded-xl bg-ios-blueBg flex items-center justify-center">
+        <iconify-icon icon="lucide:globe" width="18" height="18" class="text-ios-blue"></iconify-icon>
+      </div>
+      <div>
+        <h3 class="font-semibold text-ios-label dark:text-slate-100">站点域名</h3>
+        <p class="text-xs text-ios-label3">用户分享火花卡时，卡片上的二维码指向这里</p>
+      </div>
+    </div>
+    <label class="label">对外访问地址</label>
+    <input name="site_url" value="{{ cfg.site_url }}" class="input"
+           placeholder="https://spark.example.com" inputmode="url" />
+    <p class="text-xs text-ios-label3 mt-1.5">
+      留空则分享卡不显示二维码。需含 http:// 或 https://，末尾斜杠会自动去掉。
+    </p>
+  </div>
+
+  <!-- 闲鱼链接 -->
+  <div class="apple-card-solid p-5">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-9 h-9 rounded-xl bg-ios-tintBg flex items-center justify-center">
+        <iconify-icon icon="lucide:shopping-bag" width="18" height="18" class="text-ios-tint"></iconify-icon>
+      </div>
+      <div>
+        <h3 class="font-semibold text-ios-label dark:text-slate-100">闲鱼商品链接</h3>
+        <p class="text-xs text-ios-label3">前台的购买入口；<strong>留空则完全不显示</strong></p>
+      </div>
+    </div>
+    <label class="label">商品链接</label>
+    <input name="xianyu_url" value="{{ cfg.xianyu_url }}" class="input"
+           placeholder="https://m.tb.cn/h.xxxxx" inputmode="url" />
+    <label class="label mt-3">附带说明（可选）</label>
+    <input name="xianyu_note" value="{{ cfg.xianyu_note }}" class="input"
+           placeholder="口令 HU287" maxlength="60" />
+    <div class="mt-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40 text-xs text-ios-label2 dark:text-slate-300">
+      <iconify-icon icon="lucide:info" width="13" height="13" class="mr-1"></iconify-icon>
+      自用部署建议留空 —— 用户就不会看到购买推广位。
+    </div>
+  </div>
+
+  <div class="flex justify-end">
+    <button type="submit" class="apple-btn-tint">
+      <iconify-icon icon="lucide:save" width="15" height="15"></iconify-icon>
+      保存设置
+    </button>
+  </div>
+</form>
+
+<!-- 预览 -->
+{% if cfg.xianyu_url %}
+<div class="mt-6 max-w-2xl">
+  <div class="text-xs text-ios-label3 mb-2">前台购买入口预览：</div>
+  {% include '_buy_cta.html' %}
+</div>
+{% endif %}
+
+{% endblock %}

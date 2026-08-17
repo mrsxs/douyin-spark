@@ -1,0 +1,523 @@
+{#
+  AI 自动回复面板。放在 chat.html 的 x-data="chat()" 作用域内 ——
+  联系人列表的 AI 徽标、会话头的开关、面板本身都读同一份状态，
+  拆成独立组件反而要写一堆跨组件同步。
+
+  iOS sheet 风格：右侧滑出、背景模糊、段控切页。
+#}
+{% set FIELD = "w-full px-3 py-2 text-sm rounded-xl bg-ios-fill2 dark:bg-slate-700 border-0 text-ios-label dark:text-slate-100 placeholder:text-ios-label3 focus:ring-2 focus:ring-ios-tint/40" %}
+{% set LABEL = "block text-xs font-semibold text-ios-label2 dark:text-slate-300 mb-1.5" %}
+{% set HINT = "mt-1 text-[11px] text-ios-label3 leading-relaxed" %}
+{% set CARD = "apple-card-solid p-4 space-y-3.5" %}
+
+<div x-show="aiOpen" x-cloak
+     @keydown.escape.window="aiOpen = false"
+     class="fixed inset-0 z-[60] flex justify-end">
+
+  <div class="absolute inset-0 bg-black/30 backdrop-blur-sm"
+       x-show="aiOpen" x-transition.opacity
+       @click="aiOpen = false"></div>
+
+  <div class="relative w-full sm:max-w-[540px] h-full bg-ios-bg dark:bg-slate-900 shadow-2xl flex flex-col"
+       x-show="aiOpen"
+       x-transition:enter="transition ease-out duration-300"
+       x-transition:enter-start="translate-x-full"
+       x-transition:enter-end="translate-x-0"
+       x-transition:leave="transition ease-in duration-200"
+       x-transition:leave-start="translate-x-0"
+       x-transition:leave-end="translate-x-full">
+
+    <!-- ── 头部：总开关就在这儿，不用翻到设置里找 ── -->
+    <div class="shrink-0 px-4 pt-4 pb-3 border-b border-ios-sep dark:border-slate-700
+                pt-[max(1rem,env(safe-area-inset-top))]">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-full bg-ios-purpleBg flex items-center justify-center shrink-0">
+          <iconify-icon icon="lucide:bot" width="18" height="18" class="text-ios-purple"></iconify-icon>
+        </div>
+        <div class="min-w-0 flex-1">
+          <h2 class="text-base font-bold text-ios-label dark:text-slate-100">AI 自动回复</h2>
+          <p class="text-[11px] text-ios-label3 truncate"
+             x-text="aiCfg.enabled
+               ? ('已开启 · ' + aiEnabledCount + ' 位联系人生效')
+               : '已关闭 · 开启后仅对白名单里的联系人生效'"></p>
+        </div>
+        <button type="button" @click="toggleAi()" :disabled="aiSaving"
+                class="ios-switch shrink-0 disabled:opacity-40"
+                :class="aiCfg.enabled ? 'ios-switch-on' : 'ios-switch-off'"
+                :aria-checked="aiCfg.enabled" role="switch" aria-label="AI 自动回复总开关">
+          <span class="ios-switch-knob"></span>
+        </button>
+        <button @click="aiOpen = false"
+                class="w-8 h-8 rounded-full hover:bg-ios-fill2 dark:hover:bg-slate-700 flex items-center justify-center text-ios-label2 shrink-0"
+                aria-label="关闭">
+          <iconify-icon icon="lucide:x" width="18" height="18"></iconify-icon>
+        </button>
+      </div>
+
+      <div class="ios-seg w-full mt-3 grid grid-cols-4">
+        <template x-for="t in AI_TABS" :key="t.key">
+          <button type="button" class="ios-seg-item text-center"
+                  :class="aiTab === t.key && 'on'"
+                  @click="switchAiTab(t.key)" x-text="t.label"></button>
+        </template>
+      </div>
+    </div>
+
+    <div class="flex-1 overflow-y-auto chat-scroll px-4 py-4 space-y-4
+                pb-[max(1rem,env(safe-area-inset-bottom))]">
+
+      <!-- ══ 设置 ══ -->
+      <template x-if="aiTab === 'setup'">
+        <div class="space-y-4">
+
+          <div class="{{ CARD }}">
+            <div class="flex items-center gap-2">
+              <iconify-icon icon="lucide:plug" width="15" height="15" class="text-ios-label2"></iconify-icon>
+              <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">模型接入</h3>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">协议</label>
+              <div class="ios-seg">
+                <button type="button" class="ios-seg-item" :class="aiCfg.provider === 'openai' && 'on'"
+                        @click="aiCfg.provider = 'openai'">OpenAI 兼容</button>
+                <button type="button" class="ios-seg-item" :class="aiCfg.provider === 'anthropic' && 'on'"
+                        @click="aiCfg.provider = 'anthropic'">Anthropic</button>
+              </div>
+              <p class="{{ HINT }}"
+                 x-text="aiCfg.provider === 'openai'
+                   ? 'DeepSeek / 通义 / Kimi / 智谱 / 自建 vLLM 都走这个协议'
+                   : 'Claude 官方接口'"></p>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">接口地址</label>
+              <input x-model="aiCfg.base_url" type="url" spellcheck="false"
+                     :placeholder="aiCfg.provider === 'openai'
+                       ? 'https://api.deepseek.com/v1' : 'https://api.anthropic.com'"
+                     class="{{ FIELD }}">
+              <p class="{{ HINT }}">填根地址或带 /v1 都行，会自动补全端点。</p>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">模型名</label>
+              <input x-model="aiCfg.model" type="text" spellcheck="false"
+                     :placeholder="aiCfg.provider === 'openai' ? 'deepseek-chat' : 'claude-sonnet-5'"
+                     class="{{ FIELD }}">
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">API Key</label>
+              <input x-model="aiKeyInput" type="password" autocomplete="new-password" spellcheck="false"
+                     :placeholder="aiCfg.has_key ? '已配置 · 留空则不修改' : 'sk-…'"
+                     class="{{ FIELD }}">
+              {# key 加密入库，接口只回 has_key 布尔值，所以这里永远是空的 #}
+              <p class="{{ HINT }}">加密存库，保存后不再回显。清空请点下面的「移除 Key」。</p>
+              <button x-show="aiCfg.has_key" type="button" @click="removeAiKey()"
+                      class="mt-1 text-[11px] font-semibold text-ios-red hover:underline">移除 Key</button>
+            </div>
+
+            {#
+              思考开关。放在模型接入里而不是「安全与限流」——
+              它本质是「这个模型怎么调」，而且直接决定花多少钱。
+            #}
+            <div class="pt-1 border-t border-ios-sep/70 dark:border-slate-700">
+              <div class="flex items-start gap-3 pt-3">
+                <div class="min-w-0 flex-1">
+                  <label class="{{ LABEL }} !mb-0.5">让模型先思考</label>
+                  <p class="text-[11px] text-ios-label3 leading-relaxed">
+                    只对会思考的模型有意义（DeepSeek-V4、o 系列、Claude thinking）。
+                    普通模型（如 deepseek-chat）开不开都一样。
+                  </p>
+                </div>
+                <button type="button" @click="aiCfg.thinking = !aiCfg.thinking"
+                        class="ios-switch shrink-0 mt-0.5"
+                        :class="aiCfg.thinking ? 'ios-switch-on' : 'ios-switch-off'"
+                        :aria-checked="aiCfg.thinking" role="switch" aria-label="让模型先思考">
+                  <span class="ios-switch-knob"></span>
+                </button>
+              </div>
+
+              <div class="mt-2 rounded-xl px-3 py-2"
+                   :class="aiCfg.thinking
+                     ? 'bg-ios-blueBg/60 dark:bg-slate-800'
+                     : 'bg-ios-greenBg/60 dark:bg-slate-800'">
+                <p class="text-[11px] leading-relaxed text-ios-label2 dark:text-slate-300"
+                   x-show="aiCfg.thinking">
+                  <b>开：贵而稳。</b>实测一条回复约 1500 token、5~10 秒。
+                  模型能主动表达「这条不该回」，借钱、要微信这类会被它自己挡掉。
+                </p>
+                <p class="text-[11px] leading-relaxed text-ios-label2 dark:text-slate-300"
+                   x-show="!aiCfg.thinking">
+                  <b>关：快而省。</b>约 600 token、1~2 秒，省一半以上。
+                  代价是模型不再输出结构化结果，弃权改用暗号
+                  <code class="px-1 rounded bg-ios-fill2 dark:bg-slate-700">[SKIP]</code> 表达，
+                  判断力略降 —— 但链接、手机号、微信号这些<b>硬拦截仍在代码里</b>，照样拦。
+                </p>
+              </div>
+
+              <p x-show="aiCfg.fewshot" class="{{ HINT }}">
+                ⚠️ 你自定义过示例。切换这个开关后请去「回复策略」检查示例的输出形态 ——
+                开思考要写成 JSON，关思考要写成纯文本。
+              </p>
+            </div>
+          </div>
+
+          <div class="{{ CARD }}">
+            <div class="flex items-center gap-2">
+              <iconify-icon icon="lucide:message-square-quote" width="15" height="15" class="text-ios-label2"></iconify-icon>
+              <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">话术</h3>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">人设</label>
+              <textarea x-model="aiCfg.persona" rows="3" class="{{ FIELD }} resize-y"
+                        placeholder="你是账号主人本人，语气自然随意，像平时发消息那样。"></textarea>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">提示词模板</label>
+              <textarea x-model="aiCfg.prompt_template" rows="3" class="{{ FIELD }} resize-y font-mono text-[13px]"
+                        placeholder="{% raw %}{{nickname}} 发来消息：{{userinput}}{% endraw %}"></textarea>
+              <p class="{{ HINT }}">
+                可用变量：
+                <template x-for="v in AI_VARS" :key="v.name">
+                  <button type="button" @click="insertVar('prompt_template', v.name)"
+                          class="apple-chip-gray mr-1 mb-1 !text-[10px] hover:bg-ios-fill3"
+                          :title="v.desc" x-text="v.label"></button>
+                </template>
+                <br>
+                <span class="text-ios-tint font-semibold">{% raw %}{{userinput}}{% endraw %}</span>
+                是对方发来的原话，漏了会自动补在末尾。
+              </p>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">回复格式</label>
+              <input x-model="aiCfg.reply_format" type="text"
+                     class="{{ FIELD }} font-mono text-[13px]"
+                     placeholder="{% raw %}{{message}}{% endraw %}">
+              <p class="{{ HINT }}">
+                <span class="text-ios-tint font-semibold">{% raw %}{{message}}{% endraw %}</span>
+                是模型生成的内容。想统一加后缀就写
+                <code class="px-1 rounded bg-ios-fill2 dark:bg-slate-700">{% raw %}{{message}}~{% endraw %}</code>；
+                留空等同于直接发原文。
+              </p>
+            </div>
+          </div>
+
+          <div class="{{ CARD }}">
+            <div class="flex items-center gap-2">
+              <iconify-icon icon="lucide:scale" width="15" height="15" class="text-ios-label2"></iconify-icon>
+              <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">回复策略</h3>
+              <span x-show="aiCfg.decline_policy || aiCfg.fewshot"
+                    class="apple-chip-purple !text-[10px] ml-auto">已自定义</span>
+            </div>
+            <p class="{{ HINT }} !mt-0">
+              决定「什么该回、什么该弃权」。留空就用下面显示的默认策略。
+            </p>
+
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <label class="{{ LABEL }} !mb-0">弃权策略</label>
+                <button type="button" @click="resetPolicy('decline_policy')"
+                        class="text-[11px] font-semibold text-ios-blue hover:underline">
+                  <span x-text="aiCfg.decline_policy ? '恢复默认' : '载入默认后编辑'"></span>
+                </button>
+              </div>
+              <textarea x-model="aiCfg.decline_policy" rows="10"
+                        class="{{ FIELD }} resize-y font-mono text-[12px] leading-relaxed"
+                        :placeholder="aiDefaults.decline_policy"></textarea>
+              <p class="{{ HINT }}">
+                收得太紧会像现在这样「什么都不回」——
+                写死「看不懂就弃权」的那一版，对「问」「在吗」全部弃权。
+                建议先立「默认必须回」，再把弃权收窄到钱款、隐私、辱骂、违法这几条红线。
+              </p>
+            </div>
+
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <label class="{{ LABEL }} !mb-0">示例</label>
+                <button type="button" @click="resetPolicy('fewshot')"
+                        class="text-[11px] font-semibold text-ios-blue hover:underline">
+                  <span x-text="aiCfg.fewshot ? '恢复默认' : '载入默认后编辑'"></span>
+                </button>
+              </div>
+              <textarea x-model="aiCfg.fewshot" rows="8"
+                        class="{{ FIELD }} resize-y font-mono text-[12px] leading-relaxed"
+                        :placeholder="aiDefaults.fewshot"></textarea>
+              <p class="{{ HINT }}">
+                校准弃权尺度最有效的手段 —— 给两三个例子胜过写十行规则。
+                正反面都要有：只给该回的例子，模型会学成「什么都回」。
+              </p>
+            </div>
+
+            <details class="rounded-xl bg-ios-fill2/60 dark:bg-slate-700/40 px-3 py-2">
+              <summary class="text-xs font-semibold text-ios-label2 dark:text-slate-300 cursor-pointer">
+                输出格式契约（只读）
+              </summary>
+              <p class="{{ HINT }}">
+                清洗层依赖这段约定来解析模型输出，所以不开放编辑。
+                链接、手机号、微信号、自曝 AI 身份是代码里的硬拦截，改提示词也绕不过。
+              </p>
+              <pre class="mt-2 text-[11px] text-ios-label2 dark:text-slate-400 whitespace-pre-wrap font-mono"
+                   x-text="aiDefaults.output_contract"></pre>
+            </details>
+
+            <div>
+              <button type="button" @click="loadPromptPreview()"
+                      class="apple-btn-sec w-full">
+                <iconify-icon icon="lucide:eye" width="14" height="14"></iconify-icon>
+                预览完整提示词
+              </button>
+              <template x-if="promptPreview">
+                <div class="mt-2">
+                  <p class="{{ HINT }} !mt-0">
+                    这就是此刻真正发给模型的内容（知识库按对方那句话现查，此处为空）。
+                  </p>
+                  <pre class="mt-1 max-h-72 overflow-y-auto chat-scroll rounded-xl bg-ios-fill2 dark:bg-slate-700 p-3 text-[11px] text-ios-label dark:text-slate-200 whitespace-pre-wrap font-mono"
+                       x-text="promptPreview"></pre>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div class="{{ CARD }}">
+            <div class="flex items-center gap-2">
+              <iconify-icon icon="lucide:shield-check" width="15" height="15" class="text-ios-label2"></iconify-icon>
+              <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">安全与限流</h3>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="{{ LABEL }}">回复字数上限</label>
+                <input x-model.number="aiCfg.max_chars" type="number" min="10" max="200" class="{{ FIELD }}">
+              </div>
+              <div>
+                <label class="{{ LABEL }}">同一人冷却（秒）</label>
+                <input x-model.number="aiCfg.cooldown_sec" type="number" min="5" max="3600" class="{{ FIELD }}">
+              </div>
+              <div>
+                <label class="{{ LABEL }}">每日回复上限</label>
+                <input x-model.number="aiCfg.daily_limit" type="number" min="1" max="2000" class="{{ FIELD }}">
+              </div>
+              <div>
+                <label class="{{ LABEL }}">带几轮上下文</label>
+                <input x-model.number="aiCfg.history_turns" type="number" min="0" max="20" class="{{ FIELD }}">
+              </div>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">后台检查间隔（秒）</label>
+              <input x-model.number="aiCfg.poll_interval" type="number" min="15" max="600" class="{{ FIELD }}">
+              <p class="{{ HINT }}">
+                没人打开聊天页时，多久去抖音查一次新消息。一次约 1.5MB，
+                调太快等于持续给风控送素材，建议 30 秒以上。
+              </p>
+            </div>
+
+            <div>
+              <label class="{{ LABEL }}">禁词</label>
+              <input x-model="aiCfg.banned_words" type="text" class="{{ FIELD }}"
+                     placeholder="退款, 投诉, 价格">
+              <p class="{{ HINT }}">
+                逗号分隔。命中即整条不发。链接、手机号、微信号、自曝 AI 身份
+                已经是内置硬拦截，不用在这里重复写。
+              </p>
+            </div>
+          </div>
+
+          <button @click="saveAiCfg()" :disabled="aiSaving"
+                  class="apple-btn-tint w-full">
+            <iconify-icon x-show="aiSaving" icon="lucide:loader-2" width="15" height="15" class="animate-spin"></iconify-icon>
+            <span x-text="aiSaving ? '保存中…' : '保存设置'"></span>
+          </button>
+        </div>
+      </template>
+
+      <!-- ══ 知识库 ══ -->
+      <template x-if="aiTab === 'kb'">
+        <div class="space-y-4">
+          <div class="ios-seg w-full grid grid-cols-2">
+            <button type="button" class="ios-seg-item text-center" :class="kbScope === '*' && 'on'"
+                    @click="switchKb('*')">
+              通用<span x-show="kbCounts['*']" class="ml-1 opacity-60" x-text="'(' + (kbCounts['*']||0) + ')'"></span>
+            </button>
+            <button type="button" class="ios-seg-item text-center truncate"
+                    :class="kbScope !== '*' && 'on'"
+                    @click="peerUid && switchKb(peerUid)" :disabled="!peerUid">
+              <span x-text="peer ? (peer.nickname || peer.uid) : '选个联系人'"></span>
+              <span x-show="peerUid && kbCounts[peerUid]" class="ml-1 opacity-60"
+                    x-text="'(' + (kbCounts[peerUid]||0) + ')'"></span>
+            </button>
+          </div>
+
+          <div class="rounded-xl bg-ios-blueBg/60 dark:bg-slate-800 px-3 py-2.5 flex gap-2">
+            <iconify-icon icon="lucide:info" width="14" height="14" class="text-ios-blue shrink-0 mt-0.5"></iconify-icon>
+            <p class="text-[11px] text-ios-label2 dark:text-slate-300 leading-relaxed">
+              通用知识库对所有人生效；联系人知识库只对他生效。
+              <b>两者互不影响</b>，回复时会各取最相关的几条一起给模型。
+            </p>
+          </div>
+
+          <div class="{{ CARD }}">
+            <h3 class="text-sm font-bold text-ios-label dark:text-slate-100"
+                x-text="kbEditing ? '编辑条目' : '新增条目'"></h3>
+            <div>
+              <label class="{{ LABEL }}">标题</label>
+              <input x-model="kbForm.title" type="text" class="{{ FIELD }}" placeholder="营业时间">
+            </div>
+            <div>
+              <label class="{{ LABEL }}">内容</label>
+              <textarea x-model="kbForm.content" rows="3" class="{{ FIELD }} resize-y"
+                        placeholder="每天早九点到晚六点，周三休息。"></textarea>
+            </div>
+            <div>
+              <label class="{{ LABEL }}">触发词</label>
+              <input x-model="kbForm.keywords" type="text" class="{{ FIELD }}" placeholder="营业, 几点, 开门">
+              <p class="{{ HINT }}">逗号分隔。对方消息里出现这些词，这条会被优先取用。</p>
+            </div>
+            <div class="flex gap-2">
+              <button @click="saveKb()" :disabled="kbSaving" class="apple-btn-tint flex-1">
+                <span x-text="kbEditing ? '保存修改' : '添加'"></span>
+              </button>
+              <button x-show="kbEditing" @click="resetKbForm()" class="apple-btn-sec">取消</button>
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <template x-for="e in kbEntries" :key="e.id">
+              <div class="apple-card-solid p-3">
+                <div class="flex items-start gap-2">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-sm font-semibold text-ios-label dark:text-slate-100 truncate"
+                            x-text="e.title || '(无标题)'"></span>
+                      <span x-show="!e.enabled" class="apple-chip-gray !text-[10px]">已停用</span>
+                    </div>
+                    <p class="text-xs text-ios-label2 dark:text-slate-400 mt-0.5 line-clamp-2"
+                       x-text="e.content"></p>
+                    <p x-show="e.keywords" class="text-[11px] text-ios-label3 mt-1"
+                       x-text="'触发词：' + e.keywords"></p>
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button type="button" @click="toggleKb(e)" class="ios-switch scale-[0.72] origin-right"
+                            :class="e.enabled ? 'ios-switch-on' : 'ios-switch-off'"
+                            :aria-label="'启用 ' + (e.title || '条目')">
+                      <span class="ios-switch-knob"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="flex gap-2 mt-2 pt-2 border-t border-ios-sep/70 dark:border-slate-700">
+                  <button @click="editKb(e)" class="text-[11px] font-semibold text-ios-blue hover:underline">编辑</button>
+                  <button @click="deleteKb(e)" class="text-[11px] font-semibold text-ios-red hover:underline">删除</button>
+                </div>
+              </div>
+            </template>
+            <p x-show="!kbEntries.length" class="text-center text-xs text-ios-label3 py-8">
+              这个知识库还是空的
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <!-- ══ 试跑 ══ -->
+      <template x-if="aiTab === 'test'">
+        <div class="space-y-4">
+          <div class="rounded-xl bg-ios-greenBg/60 dark:bg-slate-800 px-3 py-2.5 flex gap-2">
+            <iconify-icon icon="lucide:shield" width="14" height="14" class="text-ios-green shrink-0 mt-0.5"></iconify-icon>
+            <p class="text-[11px] text-ios-label2 dark:text-slate-300 leading-relaxed">
+              试跑<b>不会真的发出去</b>。开启自动回复前先在这里跑几条，
+              确认格式和拦截规则都符合预期。
+            </p>
+          </div>
+
+          <div class="{{ CARD }}">
+            <div>
+              <label class="{{ LABEL }}">假装对方发来</label>
+              <textarea x-model="aiTest.input" rows="2" class="{{ FIELD }} resize-y"
+                        placeholder="在吗？你们几点营业"></textarea>
+            </div>
+            <button @click="runAiTest()" :disabled="aiTest.running || !aiTest.input.trim()"
+                    class="apple-btn-tint w-full">
+              <iconify-icon x-show="aiTest.running" icon="lucide:loader-2" width="15" height="15" class="animate-spin"></iconify-icon>
+              <span x-text="aiTest.running ? '生成中…' : '试跑一次'"></span>
+            </button>
+          </div>
+
+          <template x-if="aiTest.result">
+            <div class="space-y-3">
+              <div class="{{ CARD }}">
+                <div class="flex items-center justify-between">
+                  <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">结果</h3>
+                  <span class="apple-chip" :class="aiTest.result.blocked ? 'apple-chip-red' : 'apple-chip-green'"
+                        x-text="aiTest.result.blocked ? '已拦下' : '会发出'"></span>
+                </div>
+
+                <template x-if="!aiTest.result.blocked">
+                  <div class="flex justify-end">
+                    <div class="max-w-[85%] px-3 py-2 rounded-2xl rounded-br-md bg-ios-tint text-white text-sm break-words whitespace-pre-wrap"
+                         x-text="aiTest.result.reply"></div>
+                  </div>
+                </template>
+
+                <p class="text-[11px] text-ios-label2 dark:text-slate-400"
+                   x-text="aiTest.result.reason_label"></p>
+
+                <div class="flex flex-wrap gap-3 text-[11px] text-ios-label3">
+                  <span x-show="aiTest.result.reply" x-text="'字数 ' + (aiTest.result.reply || '').length"></span>
+                  <span x-text="'tokens ' + aiTest.result.tokens"></span>
+                  <span x-text="aiTest.result.latency_ms + ' ms'"></span>
+                </div>
+              </div>
+
+              <div x-show="aiTest.result.knowledge" class="{{ CARD }}">
+                <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">命中的知识</h3>
+                <pre class="text-[11px] text-ios-label2 dark:text-slate-400 whitespace-pre-wrap font-mono"
+                     x-text="aiTest.result.knowledge"></pre>
+              </div>
+
+              <details class="{{ CARD }}">
+                <summary class="text-sm font-bold text-ios-label dark:text-slate-100 cursor-pointer">
+                  模型原始输出
+                </summary>
+                <pre class="text-[11px] text-ios-label2 dark:text-slate-400 whitespace-pre-wrap font-mono mt-2"
+                     x-text="aiTest.result.raw"></pre>
+              </details>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- ══ 记录 ══ -->
+      <template x-if="aiTab === 'logs'">
+        <div class="space-y-2">
+          <button @click="loadAiLogs()" class="apple-btn-sec w-full">
+            <iconify-icon icon="lucide:refresh-cw" width="14" height="14"
+                          :class="aiLogsLoading && 'animate-spin'"></iconify-icon>
+            刷新
+          </button>
+          <template x-for="l in aiLogs" :key="l.id">
+            <div class="apple-card-solid p-3">
+              <div class="flex items-center gap-2">
+                <span class="apple-chip !text-[10px]" :class="aiLogChip(l.status)"
+                      x-text="aiLogLabel(l.status)"></span>
+                <span class="text-[11px] text-ios-label3 truncate" x-text="aiPeerName(l.peer_uid)"></span>
+                <span class="text-[11px] text-ios-label3 ml-auto shrink-0"
+                      x-text="l.created_at ? timeLabel(new Date(l.created_at).getTime()) : ''"></span>
+              </div>
+              <p class="text-xs text-ios-label2 dark:text-slate-400 mt-1.5 truncate"
+                 x-text="'对方：' + l.incoming"></p>
+              <p x-show="l.final_text" class="text-xs text-ios-label dark:text-slate-200 mt-0.5 truncate"
+                 x-text="'回复：' + l.final_text"></p>
+              <p x-show="l.reason_label" class="text-[11px] text-ios-tint mt-1"
+                 x-text="l.reason_label"></p>
+            </div>
+          </template>
+          <p x-show="!aiLogs.length && !aiLogsLoading"
+             class="text-center text-xs text-ios-label3 py-8">还没有自动回复记录</p>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>

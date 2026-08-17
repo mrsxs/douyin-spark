@@ -204,8 +204,12 @@ docker exec douyin-spark python -c "from playwright.sync_api import sync_playwri
 
 - ✅ **Cython 编译**：核心代码编译成 `.so`，反编译成本极高
 - ✅ **License 过期**：离线 RSA 签名，篡改系统时间无效（签名已固定 `expires_at`）
-- ✅ **私有仓库**：未授权客户拿不到镜像
-- ⚠️ **不绑机器时**：客户可以把镜像转给别人用 → 建议对大客户开启 `LICENSE_STRICT=1`
+- ✅ **启动闸门**：验签在 `app.license.license_gate()`，`run.py` 与 `app/main.py` 的 lifespan 都要过；
+  每请求还会经过已编译的 `csrf_mw` 调 `assert_licensed()` 兜底，改明文入口也绕不过
+- ✅ **后门已关闭**：`SKIP_LICENSE_CHECK` 只在源码态有效；镜像构建时 `_ALLOW_SKIP_LICENSE` 被改成 `False` 再编译进 `license.so`
+- ⚠️ **镜像是公开的**：Docker Hub `mrsxs/douyin-spark` 免登录即可 pull（GHCR 那份才是私有）。
+  因此**不能把「拿不到镜像」当作防线**，防护完全依赖 License 校验
+- ⚠️ **不绑机器时**：客户可以把镜像转给别人用 → 建议对大客户签发时带 `--machine`（绑定后无条件生效，客户无法关闭）
 - ⚠️ **改本地系统时间**：理论上可以绕过过期，但会导致其它时间敏感功能异常（如 cookies 认证）
 
 如果要加更强保护（在线心跳验证），参考方案 B：定期回调你的 license 服务器，可远程吊销。

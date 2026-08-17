@@ -4,8 +4,11 @@ services:
     # 如果想用 GHCR 私有：先 `docker login ghcr.io`，然后改成 ghcr.io/mrsxs/douyin-spark:latest
     image: mrsxs/douyin-spark:latest
     container_name: douyin-spark
-    # 固定容器 MAC：保证机器码（基于 MAC 派生）跨重建稳定
+    # 固定容器 MAC + hostname：保证机器码跨容器重建稳定
+    # （不固定 hostname 的话，--force-recreate 后机器码会变，
+    #   绑定机器的 License 会突然启动失败）
     mac_address: "02:42:ac:de:ad:01"
+    hostname: douyin-spark
     # 固定 DNS 避免系统 DNS 瞬断导致 imapi.douyin.com 解析失败
     dns:
       - 223.5.5.5        # 阿里 DNS（国内首选）
@@ -40,8 +43,9 @@ services:
       DOUYIN_CAPTCHA_ENDPOINT: "${DOUYIN_CAPTCHA_ENDPOINT:-/slide_match}"
       DOUYIN_CAPTCHA_KEY: "${DOUYIN_CAPTCHA_KEY:-}"
 
-      # ─── License 严格模式（绑机器，可选）────
-      # LICENSE_STRICT: "1"
+      # ─── License 机器绑定 ────────────────────
+      # 无需任何环境变量：签发时若绑定了机器码，校验自动生效。
+      # 机器码取自数据卷里的 .install_id，跨容器重建稳定。
 
       # ─── 可选：邮件 SMTP（也可以在 /admin/smtp 后台配）────
       # SMTP_HOST: ""

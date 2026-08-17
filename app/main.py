@@ -3,18 +3,16 @@ FastAPI 主入口：app factory + 路由挂载 + scheduler 启动 + admin upsert
 """
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import text
 
 from .config import settings
-from .db import engine, SessionLocal, init_db
+from .db import SessionLocal, init_db
 from .models import User
-from .security import hash_password
 from . import scheduler
 from .deps import RedirectToLogin, RedirectToActivate
 
@@ -49,6 +47,9 @@ def ensure_admin():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 放在最前：直接 `uvicorn app.main:app` 绕开 run.py 时也必须过闸门
+    from .license import license_gate
+    license_gate()
     init_db()
     ensure_admin()
     scheduler.start()
@@ -59,6 +60,12 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.site_name, lifespan=lifespan)
 
+    # 限流（登录/注册/授权码兑换）——必须在挂路由前装好 state + handler
+    from slowapi.errors import RateLimitExceeded
+    from .ratelimit import limiter, rate_limit_handler
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+
     # CSRF 中间件（纯 ASGI，能正确透传 body；必须在路由之前 add）
     from .csrf_mw import CSRFMiddleware
     app.add_middleware(CSRFMiddleware, secure_cookie=settings.cookie_secure)
@@ -66,6 +73,10 @@ def create_app() -> FastAPI:
     # 模板
     tmpl = Jinja2Templates(directory="templates")
     tmpl.env.globals["site_name"] = settings.site_name
+    # tojson 默认 ensure_ascii=True，中文全变成 \uXXXX ——
+    # 聊天记录整页都是中文，转义后体积翻好几倍，调试时也没法看
+    tmpl.env.policies["json.dumps_kwargs"] = {"ensure_ascii": False,
+                                              "sort_keys": False}
     app.state.tmpl = tmpl
 
     # 静态文件
@@ -74,11 +85,12 @@ def create_app() -> FastAPI:
         app.mount("/static", StaticFiles(directory="static"), name="static")
 
     # 路由
-    from .routers import auth, dashboard, api, admin, login_flow
+    from .routers import auth, dashboard, api, admin, login_flow, ai
     app.include_router(auth.router)
     app.include_router(dashboard.router)
     app.include_router(admin.router)
     app.include_router(api.router)
+    app.include_router(ai.router)
     app.include_router(login_flow.router)
 
     # 健康检查
@@ -92,7 +104,7 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     # SEO: robots.txt
-    from fastapi.responses import PlainTextResponse, Response
+    from fastapi.responses import PlainTextResponse
     @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
     def robots(request: Request):
         base = f"{request.url.scheme}://{request.url.hostname}"
@@ -147,21 +159,31 @@ def create_app() -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def _he(request: Request, exc: StarletteHTTPException):
         code = exc.status_code
-        if code in (401, ):
+        # /api/* 要的是 JSON —— 重定向会让前端 fetch 跟到 /login 拿回 HTML，
+        # 再 r.json() 解析失败，用户只看到「非 JSON 响应」这种莫名其妙的报错。
+        is_api = request.url.path.startswith("/api/")
+        if code == 401:
+            if is_api:
+                return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
             return RedirectResponse("/login", status_code=302)
-        if code in (402, ):
+        if code == 402:
+            if is_api:
+                return JSONResponse({"ok": False, "error": "账户未激活或已过期"},
+                                    status_code=402)
             return RedirectResponse("/activate", status_code=302)
         if code in (403, 404):
+            if is_api:
+                return JSONResponse({"ok": False, "error": exc.detail}, status_code=code)
             template = f"errors/{code}.html"
             user = None
             try:
-                from .deps import SESSION_COOKIE
-                from .security import read_session
+                from .deps import SESSION_COOKIE, resolve_session_user
                 from .db import SessionLocal as SL
-                uid = read_session(request.cookies.get(SESSION_COOKIE))
-                if uid:
-                    with SL() as db:
-                        user = db.query(User).filter(User.id == uid).first()
+                with SL() as db:
+                    user = resolve_session_user(
+                        db, request.cookies.get(SESSION_COOKIE))
+                    if user:
+                        db.expunge(user)
             except Exception:
                 pass
             return app.state.tmpl.TemplateResponse(
@@ -179,6 +201,28 @@ def create_app() -> FastAPI:
         return getattr(request.state, "unread_notifications", 0)
     def _get_csrf(request: Request):
         return getattr(request.state, "csrf_token", "")
+
+    def _get_site_cfg():
+        """站点配置（域名 / 闲鱼链接）。模板里直接 site_cfg() 取。
+
+        配置很少变，用短缓存避免每次渲染都查库。
+        """
+        import time as _t
+        now = _t.monotonic()
+        cached = getattr(app.state, "_site_cfg_cache", None)
+        if cached and cached[0] > now:
+            return cached[1]
+        from .site_settings import load as _load_site
+        try:
+            with SessionLocal() as db:
+                cfg = _load_site(db)
+        except Exception:
+            cfg = {"site_url": "", "xianyu_url": "", "xianyu_note": ""}
+        app.state._site_cfg_cache = (now + 30, cfg)
+        return cfg
+
+    tmpl.env.globals["site_cfg"] = _get_site_cfg
+    app.state.invalidate_site_cfg = lambda: setattr(app.state, "_site_cfg_cache", None)
     tmpl.env.globals["get_current_user"] = _get_user_from_request
     tmpl.env.globals["get_unread_notifications"] = _get_unread_count
     tmpl.env.globals["csrf_token"] = _get_csrf

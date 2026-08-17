@@ -41,6 +41,7 @@
       {% elif error == "code_not_found" %}授权码不存在
       {% elif error == "code_used" %}授权码已被使用
       {% elif error == "code_revoked" %}授权码已被作废
+      {% elif error == "rate_limited" %}尝试过于频繁，请稍等一分钟再试
       {% else %}激活失败：{{ error }}{% endif %}
     </div>
     {% endif %}

@@ -30,48 +30,58 @@ created: 2026-04-19
 ─────────────                          ─────────────
 license_payload = {                    1. 验证签名（公钥）
   "expires_at": "...",                 2. 检查过期
-  "machine": "abc123" 或 null,         3. 严格模式 + 有 machine：
-  "tier": "pro",                          对比当前机器码
+  "machine": "abc123" 或 null,         3. payload 里有 machine：
+  "tier": "pro",                          对比当前机器指纹
   ...                                     不一致 → 拒绝
 }                                       4. 通过 → 启动
 sig = RSA-PKCS1v15(payload)
 license = b64(payload).b64(sig)
 ```
 
-机器码算法（[[10-架构与技术栈]] 详细）：
+> [!important] 绑定没有客户端开关
+> payload 受 RSA 签名保护，客户改不了。签发时绑了机器码，校验就无条件生效。
+> 旧的 `LICENSE_STRICT` 环境变量已废弃：它由客户端控制，删掉就能解绑，等于没绑。
+
+机器码算法（2026-07 起）：
 
 ```python
 def _machine_id() -> str:
-    mac = uuid.getnode()           # 容器 MAC
-    host = os.uname().nodename     # 容器 hostname
-    return sha256(f"{mac}:{host}").hexdigest()[:16]
+    # 持久化安装 ID，存 {DATA_DIR}/.install_id，首次启动生成
+    return _install_id() or _legacy_machine_id()
 ```
 
-> [!warning] 容器 MAC 不固定
-> Docker 默认每次重建容器分配新 MAC → 机器码每次重建会变 → 绑机器 license 会失效。
-> **必须在 docker-compose.yml 固定 MAC** 才能稳定绑定，本项目已固定为 `02:42:ac:de:ad:01`。
+校验时接受三种指纹中的任意一种，避免误伤存量客户：
+
+| 指纹 | 来源 | 用途 |
+|---|---|---|
+| `.install_id` | 数据卷里的随机 16 hex | 新签发推荐，跨容器重建/升级最稳 |
+| legacy | `sha256(MAC:hostname)` | 兼容存量已绑定的 License |
+| mac-only | `sha256(MAC)` | 存量客户容器重建、hostname 变化后的兜底 |
+
+> [!warning] 容器 MAC / hostname 都要固定
+> Docker 默认每次重建容器会分配新 MAC、新 hostname。
+> `docker-compose.yml` 已同时固定 `mac_address: "02:42:ac:de:ad:01"` 和 `hostname: douyin-spark`。
+> 新算法用 `.install_id` 后已不依赖这两者，但固定它们能让存量 License 继续有效。
 
 ## 完整操作流程
 
 ### Step 1：客户拿机器码
 
-让客户在他服务器跑（**优先用这条**，不依赖容器是否在跑）：
+机器码存在数据卷里，**必须在挂载了 `/data` 的正式容器里取**：
 
-```bash
-docker run --rm --mac-address "02:42:ac:de:ad:01" \
-  mrsxs/douyin-spark:latest \
-  python -c "from app.license import _machine_id; print(_machine_id())"
-```
-
-> [!note] 为什么指定 `--mac-address`
-> 这条命令启动一个临时容器，必须用和正式容器**完全一样的 MAC**，拿到的机器码才匹配未来正式运行时的机器码。
-
-输出：16 位 hex，如 `8f7e6d5c4b3a2918`
-
-如果客户已经有运行中的容器：
 ```bash
 docker exec douyin-spark python -c "from app.license import _machine_id; print(_machine_id())"
 ```
+
+输出：16 位 hex，如 `8f7e6d5c4b3a2918`
+
+> [!danger] 不能用 `docker run --rm` 取码
+> 临时容器没挂客户的数据卷，会现场生成一个随即被丢弃的 `.install_id`，
+> 拿到的码是错的，签发后客户依然启动不了。
+
+> [!note] 客户还没跑起来怎么办
+> 先发一个宽松 License（不带 `--machine`）让客户启动一次，
+> `.install_id` 会自动生成，再按上面取码换严格 License。
 
 ### Step 2：卖家签 license
 
@@ -91,11 +101,10 @@ python3 tools/issue_license.py \
 
 ```ini
 LICENSE_KEY=新签的绑机器 license
-LICENSE_STRICT=1               # 关键这一行
 ```
 
-> [!important] 必须 `LICENSE_STRICT=1`
-> 即使 license 里有 machine 字段，没设 `LICENSE_STRICT=1` 也会被忽略（视作宽松）。
+> [!note] 不需要额外开关
+> 绑定校验随 License 自动生效。旧文档要求的 `LICENSE_STRICT=1` 已废弃并被忽略。
 
 ### Step 4：重启验证
 
@@ -132,18 +141,17 @@ docker compose logs --tail 30 | grep -A 5 "License 已验证"
 | 原因 | 解决 |
 |---|---|
 | 客户换机器了（云迁移） | 客户重新跑 Step 1 拿新机器码 → 卖家重新签 |
-| docker-compose.yml 没固定 MAC | 改 compose 加 `mac_address: "02:42:ac:de:ad:01"` → `down && up -d` 重建 → 重新拿机器码 → 重签 |
+| 客户没恢复数据卷就重装 | `.install_id` 丢了 → 重新取码重签；提醒客户备份 `data/` 目录 |
 | 客户复制 license 到第二台机器 | **预期行为，正常拒绝**。如客户合理要求多台，签多份 |
 
 ### 临时回退到宽松
 
-如果客户搞坏了机器码 / 急用，**不开 STRICT** 即可绕过：
+客户端**没有任何开关**可以关闭绑定校验（这是刻意的）。
+客户急用时，唯一办法是卖家重新签一个不带 `--machine` 的 License 发过去：
 
-```ini
-# LICENSE_STRICT=1   ← 注释掉
+```bash
+python3 tools/issue_license.py --days 剩余天数 --tier pro --note "客户名-临时宽松"
 ```
-
-`docker compose restart`。系统会跳过机器码校验（payload 里有但不查），其他校验照常（过期/签名）。
 
 ## 解绑 / 换机器流程
 
@@ -187,10 +195,15 @@ python3 tools/issue_license.py --days 7 --tier basic --machine xxx --note "试�
 ## 风险与限制
 
 > [!danger] 严格模式不能防的
-> - 客户给你假机器码（要求他先 `docker run --rm` 跑一次给你看输出截图）
-> - 客户用同一个云提供商克隆机器（可能 MAC 派生算法相同）
+> - 客户给你假机器码（要求他先跑一次 `docker exec` 命令给你看输出截图）
+> - 客户复制整个 `data/` 目录到另一台机器（`.install_id` 跟着走 → 绑定被绕过）
 > - 客户改本地系统时间绕过过期（用[[40-开发流程#在线心跳验证]]才能挡）
 > - 客户反编译 .so 跳过 license 检查（Cython 难度高但不是不可能）
+
+> [!info] 离线 License 的固有限制
+> 客户完全控制运行环境时，任何离线方案都挡不住有心破解，
+> 机器绑定挡的是「随手把镜像转给朋友用」这一类。
+> 真要防转售，只能上在线心跳校验。
 
 > [!info] 严格模式适合的场景
 > - 一次性付费 + 长期有效（预防永久白嫖）
@@ -211,5 +224,5 @@ python3 tools/issue_license.py --days 7 --tier basic --machine xxx --note "试�
 - [ ] 用 `tools/issue_license.py` 签发
 - [ ] **本地记录**：客户 / 机器码 / 到期 / 备注
 - [ ] License 字符串发客户（推荐微信/邮件，避免 IM 中转截断）
-- [ ] 提醒客户 `.env` 同时加 `LICENSE_STRICT=1`
+- [ ] 提醒客户备份 `data/` 目录（含 `.install_id`，丢了要重新签）
 - [ ] 客户报告"已生效，看到机器绑定: 严格" → 完成

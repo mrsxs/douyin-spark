@@ -9,7 +9,8 @@
     <h1 class="text-2xl font-bold text-center mb-6">登录</h1>
     {% if error %}
     <div class="mb-4 p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-lg text-sm text-rose-700 dark:text-rose-400">
-      用户名或密码错误
+      {% if error == "rate_limited" %}尝试过于频繁，请稍等一分钟再试
+      {% else %}用户名或密码错误{% endif %}
     </div>
     {% endif %}
     <form method="post" action="/login" class="space-y-4">

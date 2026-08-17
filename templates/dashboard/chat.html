@@ -1,0 +1,896 @@
+{% extends "base.html" %}
+{% block title %}聊天 · {{ acc.label }}{% endblock %}
+{% block content %}
+
+<style>
+  /* 默认滚动条在浅色卡片上是一条突兀的深色竖带，聊天页两栏都在滚，很显眼 */
+  .chat-scroll { scrollbar-width: thin; scrollbar-color: rgba(60,60,67,.28) transparent; }
+  .chat-scroll::-webkit-scrollbar { width: 8px; }
+  .chat-scroll::-webkit-scrollbar-track { background: transparent; }
+  .chat-scroll::-webkit-scrollbar-thumb {
+    background: rgba(60,60,67,.26); border-radius: 8px;
+  }
+  .chat-scroll::-webkit-scrollbar-thumb:hover { background: rgba(60,60,67,.42); }
+  .dark .chat-scroll { scrollbar-color: rgba(235,235,245,.28) transparent; }
+  .dark .chat-scroll::-webkit-scrollbar-thumb { background: rgba(235,235,245,.24); }
+</style>
+
+{#
+  聊天页。两栏：左会话列表 / 右消息窗。
+  手机上是两个"页面"——选了人才显示消息窗，返回键退回列表，
+  否则 375px 宽塞两栏谁都用不了。
+#}
+<div x-data="chat()" x-init="init()" class="-mt-1">
+
+  <!-- 顶部 -->
+  <div class="flex items-center gap-3 mb-4">
+    <a href="/accounts/{{ acc.id }}"
+       class="shrink-0 w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2"
+       aria-label="返回">
+      <iconify-icon icon="lucide:arrow-left" width="18" height="18"></iconify-icon>
+    </a>
+    <div class="min-w-0 flex-1">
+      <h1 class="text-xl font-bold text-ios-label dark:text-slate-100 truncate">聊天</h1>
+      <p class="text-xs text-ios-label3 truncate">{{ acc.nickname or acc.label }}</p>
+    </div>
+    <!-- 实时状态 + 刷新频率：用户得知道消息是不是活的，也得能自己调快慢 -->
+    <div class="flex items-center gap-2 shrink-0">
+      <button @click="openAi()" title="AI 自动回复"
+              class="apple-chip transition"
+              :class="aiCfg.enabled ? 'apple-chip-purple' : 'apple-chip-gray'">
+        <iconify-icon icon="lucide:bot" width="13" height="13"></iconify-icon>
+        <span class="hidden sm:inline" x-text="aiCfg.enabled ? 'AI 已开' : 'AI'"></span>
+      </button>
+      <select x-model="refresh" @change="setRefresh()"
+              title="每隔多久去抖音查一次新消息"
+              class="text-xs font-semibold rounded-xl border-0 bg-ios-fill2 dark:bg-slate-700 text-ios-label dark:text-slate-100 py-1.5 pl-2.5 pr-7 focus:ring-2 focus:ring-ios-tint/40">
+        <template x-for="o in REFRESH_OPTIONS" :key="o.value">
+          <option :value="o.value" x-text="o.label"></option>
+        </template>
+      </select>
+      <span class="apple-chip" :class="live ? 'apple-chip-green' : 'apple-chip-gray'">
+        <span class="w-1.5 h-1.5 rounded-full"
+              :class="live ? 'bg-ios-green animate-pulse' : 'bg-ios-label3'"></span>
+        <span x-text="live ? '实时' : (refresh === 'off' ? '已关闭' : '未连接')"></span>
+      </span>
+    </div>
+  </div>
+
+  {% if not contacts %}
+  <div class="apple-card-solid p-10 text-center">
+    <iconify-icon icon="lucide:messages-square" width="40" height="40" class="text-ios-label3"></iconify-icon>
+    <p class="mt-3 text-sm text-ios-label2">还没有联系人</p>
+    <a href="/accounts/{{ acc.id }}" class="apple-btn-sec mt-4 inline-flex">去同步联系人</a>
+  </div>
+  {% else %}
+
+  <div class="grid md:grid-cols-[300px_1fr] gap-4 md:h-[calc(100vh-190px)]">
+
+    <!-- ── 会话列表 ── -->
+    <div class="apple-card-solid overflow-hidden flex flex-col"
+         :class="peerUid && 'hidden md:flex'">
+      <div class="p-2.5 border-b border-ios-sep dark:border-slate-700">
+        <div class="relative">
+          <iconify-icon icon="lucide:search" width="15" height="15"
+            class="absolute left-2.5 top-1/2 -translate-y-1/2 text-ios-label3"></iconify-icon>
+          <input x-model="q" type="search" placeholder="搜索联系人"
+            class="w-full pl-8 pr-3 py-1.5 text-sm rounded-xl bg-ios-fill2 dark:bg-slate-700 border-0 focus:ring-2 focus:ring-ios-tint/40">
+        </div>
+      </div>
+      <div class="chat-scroll overflow-y-auto flex-1 max-h-[50vh] md:max-h-none">
+        <template x-for="c in filtered" :key="c.uid">
+          <button @click="open(c)"
+            class="w-full flex items-center gap-2.5 px-3 py-2.5 text-left hover:bg-ios-fill2 dark:hover:bg-slate-700/50 transition-colors border-b border-ios-sep/50 dark:border-slate-700/50"
+            :class="c.uid === peerUid && 'bg-ios-tintBg dark:bg-slate-700'">
+            <img :src="c.avatar" x-show="c.avatar" alt=""
+                 class="w-9 h-9 rounded-full object-cover shrink-0 bg-ios-fill2">
+            <div x-show="!c.avatar"
+                 class="w-9 h-9 rounded-full shrink-0 bg-ios-fill3 dark:bg-slate-600 flex items-center justify-center text-xs font-bold text-ios-label2"
+                 x-text="(c.nickname || c.uid).slice(0,1)"></div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5">
+                <span class="text-sm font-semibold text-ios-label dark:text-slate-100 truncate"
+                      x-text="c.nickname || c.uid"></span>
+                <span x-show="c.days" class="apple-chip-tint text-[10px] shrink-0">
+                  🔥<span x-text="c.days"></span>
+                </span>
+                {# 白名单里的人给个标记，否则用户完全看不出「AI 会替我回谁」 #}
+                <iconify-icon x-show="aiPeers[c.uid] && aiPeers[c.uid].enabled && aiCfg.enabled"
+                              icon="lucide:bot" width="12" height="12"
+                              class="text-ios-purple shrink-0" title="AI 自动回复已开"></iconify-icon>
+                {# 最近消息时间靠右 —— 列表按时间排序，没有时间就看不出排序依据 #}
+                <span x-show="c.last_ms"
+                      class="ml-auto shrink-0 text-[10px] text-ios-label3 tabular-nums"
+                      x-text="listTimeLabel(c.last_ms)"></span>
+              </div>
+              <div class="text-xs text-ios-label3 truncate"
+                   x-text="(c.last_is_me ? '我: ' : '') + (c.last_text || '暂无消息')"></div>
+            </div>
+            <span x-show="unread[c.uid]"
+                  class="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-ios-red text-white text-[10px] font-bold flex items-center justify-center"
+                  x-text="unread[c.uid]"></span>
+          </button>
+        </template>
+        <p x-show="!filtered.length" class="p-6 text-center text-xs text-ios-label3">没有匹配的联系人</p>
+      </div>
+    </div>
+
+    <!-- ── 消息窗 ── -->
+    <div class="apple-card-solid overflow-hidden flex flex-col min-h-[60vh] md:min-h-0"
+         :class="!peerUid && 'hidden md:flex'">
+
+      <template x-if="!peerUid">
+        <div class="flex-1 flex items-center justify-center text-center p-8">
+          <div>
+            <iconify-icon icon="lucide:message-circle" width="36" height="36" class="text-ios-label3"></iconify-icon>
+            <p class="mt-2 text-sm text-ios-label3">选一个联系人开始聊天</p>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="peerUid">
+        <div class="flex flex-col h-full">
+          <!-- 对话头 -->
+          <div class="flex items-center gap-2.5 px-3 py-2.5 border-b border-ios-sep dark:border-slate-700 shrink-0">
+            <button @click="peerUid=''" class="md:hidden w-8 h-8 rounded-full hover:bg-ios-fill2 flex items-center justify-center text-ios-label2">
+              <iconify-icon icon="lucide:chevron-left" width="20" height="20"></iconify-icon>
+            </button>
+            <img :src="peer.avatar" x-show="peer && peer.avatar" alt=""
+                 class="w-8 h-8 rounded-full object-cover bg-ios-fill2">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold text-ios-label dark:text-slate-100 truncate"
+                   x-text="peer && (peer.nickname || peer.uid)"></div>
+              <div class="text-[11px] text-ios-label3" x-show="peer && peer.days">
+                🔥 已连续 <span x-text="peer && peer.days"></span> 天
+              </div>
+            </div>
+            <button @click="syncNow()" :disabled="syncing"
+              class="ml-auto w-8 h-8 rounded-full hover:bg-ios-fill2 flex items-center justify-center text-ios-label2 disabled:opacity-40"
+              title="同步最新消息">
+              <iconify-icon icon="lucide:refresh-cw" width="15" height="15"
+                :class="syncing && 'animate-spin'"></iconify-icon>
+            </button>
+            {#
+              「对谁回复」的入口就放在会话头上 —— 用户想的是「让 AI 替我回这个人」，
+              而不是「去设置里找一个白名单列表再勾一遍」。
+            #}
+            <button @click="togglePeerAi()" :disabled="aiPeerSaving"
+              class="w-8 h-8 rounded-full flex items-center justify-center transition disabled:opacity-40"
+              :class="peerAiOn
+                ? 'bg-ios-purpleBg text-ios-purple'
+                : 'hover:bg-ios-fill2 text-ios-label3'"
+              :title="peerAiOn ? '已开启：AI 会自动回复他' : '开启后 AI 会自动回复他'">
+              <iconify-icon :icon="peerAiOn ? 'lucide:bot' : 'lucide:bot-off'"
+                            width="15" height="15"></iconify-icon>
+            </button>
+          </div>
+
+          {# 总开关没开时，联系人开关是无效的，必须说清楚，否则用户以为坏了 #}
+          <div x-show="peerAiOn && !aiCfg.enabled"
+               class="shrink-0 px-3 py-1.5 bg-ios-tintBg/60 dark:bg-slate-800 flex items-center gap-2">
+            <iconify-icon icon="lucide:alert-triangle" width="12" height="12" class="text-ios-tint shrink-0"></iconify-icon>
+            <span class="text-[11px] text-ios-label2 dark:text-slate-300">
+              总开关未开启，AI 暂时不会回复
+            </span>
+            <button @click="openAi()" class="ml-auto text-[11px] font-semibold text-ios-tint hover:underline shrink-0">
+              去开启
+            </button>
+          </div>
+
+          <!-- 消息列表 -->
+          <div x-ref="scroller" @scroll="onScroll()"
+               class="chat-scroll flex-1 overflow-y-auto px-3 py-3 space-y-2 bg-ios-bg/40 dark:bg-slate-900/30">
+
+            <div x-show="loadingMore" class="text-center py-2">
+              <iconify-icon icon="lucide:loader-2" width="16" height="16" class="animate-spin text-ios-label3"></iconify-icon>
+            </div>
+            {#
+              「没有更早的消息了」这句话会让人以为记录丢了。
+              真实情况是：抖音的 init 接口每个会话只回最近 ~21 条，
+              首次同步那一刻拿到多少就是多少，更早的它再也不给。
+              这里把原因讲明白，否则每个用户都会来问「我的记录呢」。
+            #}
+            <div x-show="!hasMore && messages.length" class="text-center py-3 px-6">
+              <p class="text-[11px] font-semibold text-ios-label3">这是本地最早的记录</p>
+              <p class="mt-1 text-[10px] text-ios-label3/80 leading-relaxed">
+                抖音每次只返回每个会话最近约 21 条。<br>
+                首次同步之前的聊天记录它不提供，本地是从那时起才开始累积的。
+              </p>
+            </div>
+
+            <template x-for="(m, i) in messages" :key="m.server_msg_id">
+              <div>
+                <!-- 跨天分隔 -->
+                <div x-show="showDate(i)" class="text-center my-2">
+                  <span class="text-[11px] text-ios-label3 bg-ios-fill2 dark:bg-slate-700 px-2 py-0.5 rounded-full"
+                        x-text="dayLabel(m.created_at)"></span>
+                </div>
+
+                <template x-if="m.kind === 'system'">
+                  <p class="text-center text-[11px] text-ios-label3 py-1" x-text="m.text"></p>
+                </template>
+
+                <template x-if="m.kind !== 'system'">
+                  <div class="flex items-end" :class="m.is_me ? 'justify-end' : 'justify-start'">
+                    {#
+                      whitespace-pre-wrap 只能加在文本节点上：加在气泡容器上的话，
+                      模板里标签之间的换行和缩进会被当成真实空白渲染出来，
+                      一条「1」能撑出 138px 高的方块。
+                    #}
+                    <div class="max-w-[78%] px-3 py-2 rounded-2xl text-sm break-words"
+                         :class="m.is_me
+                           ? 'bg-ios-tint text-white rounded-br-md'
+                           : 'bg-white dark:bg-slate-700 text-ios-label dark:text-slate-100 rounded-bl-md border border-ios-sep dark:border-slate-600'">
+
+                      <!-- 内嵌媒体：分享的视频/图片直接看到画面，不用只读一行标题 -->
+                      <template x-if="m.media && m.media.cover">
+                        <button @click="openMedia(m)" type="button"
+                          class="block relative mb-1.5 rounded-xl overflow-hidden bg-black/10 w-44 max-w-full">
+                          {#
+                            封面签名 URL 带 x-expires，过期后 403 —— 这时回退到
+                            去签名版本（约四成能用），两个都挂了就把整块藏掉，
+                            免得留一个破图占位。
+                          #}
+                          <img :src="m.media.cover" alt="" loading="lazy"
+                               referrerpolicy="no-referrer"
+                               class="w-full max-h-56 object-cover"
+                               @error="onCoverError($event, m)">
+                          <template x-if="m.media.kind === 'video'">
+                            <span class="absolute inset-0 flex items-center justify-center">
+                              <span class="w-10 h-10 rounded-full bg-black/55 backdrop-blur flex items-center justify-center">
+                                <iconify-icon icon="lucide:play" width="18" height="18" class="text-white ml-0.5"></iconify-icon>
+                              </span>
+                            </span>
+                          </template>
+                        </button>
+                      </template>
+
+                      <!-- 没封面但有视频 id：至少给个能点开的入口 -->
+                      <template x-if="m.media && !m.media.cover && m.media.vid">
+                        <button @click="openMedia(m)" type="button"
+                          class="flex items-center gap-1 mb-1 text-xs underline opacity-80">
+                          <iconify-icon icon="lucide:play-circle" width="13" height="13"></iconify-icon>
+                          播放视频
+                        </button>
+                      </template>
+
+                      <div><span x-show="m.kind !== 'text' && !(m.media && m.media.cover)" class="opacity-70 text-xs mr-1" x-text="kindIcon(m.kind)"></span><span class="whitespace-pre-wrap" x-text="m.text"></span></div>
+                      <div class="text-[10px] mt-0.5 text-right leading-none"
+                           :class="m.is_me ? 'text-white/60' : 'text-ios-label3'"
+                           x-text="timeLabel(m.created_at)"></div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <p x-show="!messages.length && !loadingMore"
+               class="text-center text-xs text-ios-label3 py-10">
+              还没有聊天记录<br>
+              {# 别写「会慢慢攒全」—— 那让人以为老记录也会补回来，实际只会往后累积 #}
+              <span class="text-[11px]">点右上角同步一次会带回最近约 21 条，之后的新消息自动累积</span>
+            </p>
+          </div>
+
+          <!-- 输入框 -->
+          <div class="border-t border-ios-sep dark:border-slate-700 p-2.5 shrink-0
+                      pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+            <div class="flex items-end gap-2">
+              <textarea x-model="draft" x-ref="input" rows="1"
+                @keydown.enter.prevent="$event.shiftKey ? (draft += '\n') : send()"
+                @input="autoGrow()"
+                placeholder="发条消息…"
+                class="flex-1 resize-none px-3 py-2 text-sm rounded-2xl bg-ios-fill2 dark:bg-slate-700 border-0 focus:ring-2 focus:ring-ios-tint/40 max-h-28"></textarea>
+              <button @click="send()" :disabled="sending || !draft.trim()"
+                class="apple-btn-tint w-9 h-9 !px-0 rounded-full flex items-center justify-center shrink-0 disabled:opacity-40">
+                <iconify-icon x-show="!sending" icon="lucide:send" width="16" height="16"></iconify-icon>
+                <iconify-icon x-show="sending" icon="lucide:loader-2" width="16" height="16" class="animate-spin"></iconify-icon>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+  {% endif %}
+
+  {% include "dashboard/_ai_panel.html" %}
+
+  <!-- 媒体查看器：视频用抖音官方内嵌播放器，图片看原图 -->
+  <div x-show="viewer" x-cloak @keydown.escape.window="closeMedia()"
+       class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+       @click.self="closeMedia()">
+    <div class="relative w-full max-w-[420px]">
+      <button @click="closeMedia()" type="button"
+        class="absolute -top-10 right-0 w-9 h-9 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center text-white"
+        aria-label="关闭">
+        <iconify-icon icon="lucide:x" width="18" height="18"></iconify-icon>
+      </button>
+
+      <template x-if="viewer && viewer.kind === 'video'">
+        {#
+          抖音官方内嵌播放器。不用 <video> 是因为真实播放地址是带时效签名的，
+          存下来很快就 403，而且要带 referer 才放行 —— 官方 iframe 没这些问题。
+        #}
+        <div class="rounded-2xl overflow-hidden bg-black aspect-[9/16] max-h-[78vh]">
+          <iframe :src="viewer.src" class="w-full h-full" frameborder="0"
+                  allow="autoplay; encrypted-media; fullscreen"
+                  referrerpolicy="no-referrer" allowfullscreen></iframe>
+        </div>
+      </template>
+
+      <template x-if="viewer && viewer.kind === 'image'">
+        <img :src="viewer.src" alt="" referrerpolicy="no-referrer"
+             class="w-full max-h-[80vh] object-contain rounded-2xl">
+      </template>
+
+      <p x-show="viewer && viewer.text" class="mt-2 text-xs text-white/70 text-center"
+         x-text="viewer && viewer.text"></p>
+      <a x-show="viewer && viewer.kind === 'video'" :href="viewer.page" target="_blank"
+         rel="noopener noreferrer"
+         class="mt-2 block text-center text-xs text-white/60 hover:text-white underline">
+        在抖音打开
+      </a>
+    </div>
+  </div>
+</div>
+
+<script>
+{% raw %}
+/*
+  AI 自动回复面板的状态与动作。
+
+  单独一个 mixin 而不是直接写进 chat()：这一整块要用到字面量
+  {{userinput}} / {{message}}，Jinja 会把它们当模板表达式吃掉，
+  所以整块包在 {% raw %} 里。chat() 里 spread 进来即可。
+*/
+const AI_TABS = [
+  { key: 'setup', label: '设置' },
+  { key: 'kb',    label: '知识库' },
+  { key: 'test',  label: '试跑' },
+  { key: 'logs',  label: '记录' },
+];
+
+const AI_VARS = [
+  { name: 'userinput', label: '{{userinput}}', desc: '对方发来的原话' },
+  { name: 'nickname',  label: '{{nickname}}',  desc: '对方昵称' },
+  { name: 'days',      label: '{{days}}',      desc: '火花连续天数' },
+  { name: 'time',      label: '{{time}}',      desc: '当前时间 HH:MM' },
+  { name: 'knowledge', label: '{{knowledge}}', desc: '检索到的知识库片段' },
+];
+
+const AI_LOG_META = {
+  sent:        { label: '已回复', chip: 'apple-chip-green' },
+  blocked:     { label: '被拦下', chip: 'apple-chip-red' },
+  skipped:     { label: '已跳过', chip: 'apple-chip-gray' },
+  llm_error:   { label: '模型出错', chip: 'apple-chip-red' },
+  send_failed: { label: '发送失败', chip: 'apple-chip-red' },
+  pending:     { label: '处理中', chip: 'apple-chip-blue' },
+};
+
+const KB_GLOBAL = '*';
+
+function aiMixin() {
+  return {
+    AI_TABS, AI_VARS,
+    aiOpen: false,
+    aiTab: 'setup',
+    aiCfg: { enabled: false, provider: 'openai', base_url: '', model: '',
+             has_key: false, persona: '', prompt_template: '', reply_format: '',
+             banned_words: '', decline_policy: '', fewshot: '', thinking: true,
+             max_chars: 60, cooldown_sec: 20, daily_limit: 100,
+             history_turns: 6, poll_interval: 30 },
+    // 代码内置的策略原文。空输入框拿它当占位 —— 用户既能看到默认是什么，
+    // 又一眼知道自己有没有改过（改过才有值）。
+    aiDefaults: { output_contract: '', decline_policy: '', fewshot: '' },
+    promptPreview: '',
+    aiPeers: {},
+    aiKeyInput: '',
+    aiSaving: false,
+    aiPeerSaving: false,
+
+    kbScope: KB_GLOBAL,
+    kbEntries: [],
+    kbCounts: {},
+    kbForm: { title: '', content: '', keywords: '' },
+    kbEditing: null,
+    kbSaving: false,
+
+    aiTest: { input: '', running: false, result: null },
+    aiLogs: [],
+    aiLogsLoading: false,
+
+    // 这两个必须是 getter：白名单随时在变，静态值一旦定死，
+    // 面板会永远显示「0 位联系人生效」，开关也会永远关不掉。
+    // 合并方式见 chat() 里的 defineProperties —— 用 {...} 展开会把它们求值成常量。
+    get peerAiOn() {
+      const p = this.aiPeers[this.peerUid];
+      return !!(p && p.enabled);
+    },
+    get aiEnabledCount() {
+      return Object.values(this.aiPeers).filter(p => p && p.enabled).length;
+    },
+
+    async loadAi() {
+      const r = await api(`/api/ai/${ACC_ID}`);
+      if (!r.ok) return;
+      this.aiCfg = r.config;
+      this.aiPeers = r.peers || {};
+      this.kbCounts = r.kb_counts || {};
+      this.aiDefaults = r.defaults || this.aiDefaults;
+    },
+
+    // 空 = 用默认。所以「恢复默认」是清空，「载入默认后编辑」是把
+    // 默认原文填进去让用户在上面改 —— 两个动作共用一个按钮。
+    resetPolicy(field) {
+      this.aiCfg[field] = this.aiCfg[field] ? '' : (this.aiDefaults[field] || '');
+    },
+
+    async loadPromptPreview() {
+      const r = await api(
+        `/api/ai/${ACC_ID}/prompt?uid=${encodeURIComponent(this.peerUid || '')}`);
+      this.promptPreview = r.ok ? r.system_prompt : (r.error || '预览失败');
+    },
+
+    openAi() {
+      this.aiOpen = true;
+      this.loadAi();
+    },
+
+    switchAiTab(key) {
+      this.aiTab = key;
+      // 进哪个页才拉哪个页的数据，别一开面板就打三个请求
+      if (key === 'kb') this.switchKb(this.kbScope);
+      if (key === 'logs') this.loadAiLogs();
+    },
+
+    async toggleAi() {
+      const want = !this.aiCfg.enabled;
+      // 服务端也会拒，但让用户直接看到原因比吃一个红 toast 好
+      if (want && !(this.aiCfg.model && this.aiCfg.has_key)) {
+        toast('请先填好模型名和 API Key', 'err');
+        this.aiTab = 'setup';
+        return;
+      }
+      this.aiSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}`, 'PUT', { enabled: want });
+      this.aiSaving = false;
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiCfg = r.config;
+      toast(want ? 'AI 自动回复已开启' : 'AI 自动回复已关闭');
+    },
+
+    async saveAiCfg() {
+      const p = {
+        provider: this.aiCfg.provider,
+        base_url: this.aiCfg.base_url,
+        model: this.aiCfg.model,
+        persona: this.aiCfg.persona,
+        prompt_template: this.aiCfg.prompt_template,
+        reply_format: this.aiCfg.reply_format,
+        banned_words: this.aiCfg.banned_words,
+        decline_policy: this.aiCfg.decline_policy,
+        fewshot: this.aiCfg.fewshot,
+        thinking: this.aiCfg.thinking,
+        max_chars: this.aiCfg.max_chars,
+        cooldown_sec: this.aiCfg.cooldown_sec,
+        daily_limit: this.aiCfg.daily_limit,
+        history_turns: this.aiCfg.history_turns,
+        poll_interval: this.aiCfg.poll_interval,
+      };
+      // 空输入框意味着「没动它」，不是「清空」—— 清空走 removeAiKey
+      if (this.aiKeyInput.trim()) p.api_key = this.aiKeyInput.trim();
+
+      this.aiSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}`, 'PUT', p);
+      this.aiSaving = false;
+      if (!r.ok) { toast(r.error || '保存失败', 'err'); return; }
+      this.aiCfg = r.config;
+      this.aiKeyInput = '';
+      toast('已保存');
+    },
+
+    async removeAiKey() {
+      if (!confirm('移除 API Key？自动回复会随之停止工作。')) return;
+      const r = await api(`/api/ai/${ACC_ID}`, 'PUT', { api_key: null, enabled: false });
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiCfg = r.config;
+      toast('已移除');
+    },
+
+    async togglePeerAi() {
+      if (!this.peerUid) return;
+      const want = !this.peerAiOn;
+      this.aiPeerSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}/peer/${encodeURIComponent(this.peerUid)}`,
+                          'PUT', { enabled: want });
+      this.aiPeerSaving = false;
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiPeers[this.peerUid] = r.peer;
+      const who = this.peer ? (this.peer.nickname || this.peer.uid) : '他';
+      toast(want ? `AI 将自动回复 ${who}` : `已关闭对 ${who} 的自动回复`);
+    },
+
+    insertVar(field, name) {
+      this.aiCfg[field] = (this.aiCfg[field] || '') + '{{' + name + '}}';
+    },
+
+    // ── 知识库：通用与专属各读各的，互不影响 ──
+    async switchKb(scope) {
+      this.kbScope = scope;
+      this.resetKbForm();
+      const r = await api(`/api/ai/${ACC_ID}/knowledge?uid=${encodeURIComponent(scope)}`);
+      this.kbEntries = r.ok ? r.entries : [];
+    },
+
+    resetKbForm() {
+      this.kbForm = { title: '', content: '', keywords: '' };
+      this.kbEditing = null;
+    },
+
+    editKb(e) {
+      this.kbEditing = e.id;
+      this.kbForm = { title: e.title, content: e.content, keywords: e.keywords };
+    },
+
+    async saveKb() {
+      if (!this.kbForm.title.trim() && !this.kbForm.content.trim()) {
+        toast('标题和内容不能都为空', 'err');
+        return;
+      }
+      this.kbSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}/knowledge`, 'POST', {
+        uid: this.kbScope, id: this.kbEditing, ...this.kbForm,
+      });
+      this.kbSaving = false;
+      if (!r.ok) { toast(r.error || '保存失败', 'err'); return; }
+      this.resetKbForm();
+      await this.switchKb(this.kbScope);
+      await this.loadAi();          // 条数徽标要跟着变
+      toast('已保存');
+    },
+
+    async toggleKb(e) {
+      const r = await api(`/api/ai/${ACC_ID}/knowledge`, 'POST', {
+        uid: this.kbScope, id: e.id, enabled: !e.enabled,
+      });
+      if (r.ok) e.enabled = !e.enabled;
+      else toast(r.error || '操作失败', 'err');
+    },
+
+    async deleteKb(e) {
+      if (!confirm(`删除「${e.title || '这条'}」？`)) return;
+      const r = await api(`/api/ai/${ACC_ID}/knowledge/${e.id}`, 'DELETE');
+      if (!r.ok) { toast(r.error || '删除失败', 'err'); return; }
+      await this.switchKb(this.kbScope);
+      await this.loadAi();
+      toast('已删除');
+    },
+
+    // ── 试跑：跑完整链路但不发送 ──
+    async runAiTest() {
+      const text = this.aiTest.input.trim();
+      if (!text) return;
+      this.aiTest.running = true;
+      this.aiTest.result = null;
+      const r = await api(`/api/ai/${ACC_ID}/test`, 'POST',
+                          { text, uid: this.peerUid || '' });
+      this.aiTest.running = false;
+      if (!r.ok) { toast(r.error || '试跑失败', 'err'); return; }
+      this.aiTest.result = r;
+    },
+
+    async loadAiLogs() {
+      this.aiLogsLoading = true;
+      const r = await api(`/api/ai/${ACC_ID}/logs?limit=30`);
+      this.aiLogsLoading = false;
+      this.aiLogs = r.ok ? r.logs : [];
+    },
+
+    aiLogChip(s) { return (AI_LOG_META[s] || {}).chip || 'apple-chip-gray'; },
+    aiLogLabel(s) { return (AI_LOG_META[s] || {}).label || s; },
+    aiPeerName(uid) {
+      const c = this.contacts.find(x => x.uid === uid);
+      return c ? (c.nickname || c.uid) : uid;
+    },
+  };
+}
+{% endraw %}
+</script>
+
+<script>
+const ACC_ID   = {{ acc.id }};
+const CONTACTS = {{ contacts | tojson }};
+const INIT_UID = {{ active_uid | tojson }};
+const INIT_MSGS = {{ messages | tojson }};
+const INIT_HAS_MORE = {{ has_more | tojson }};
+
+// 每隔多久去抖音查一次新消息。一次查询是 1.5MB / 约 0.8 秒，
+// 所以标出流量代价让用户自己权衡；off 完全不连 SSE ——
+// 服务端没人订阅就不轮询，对抖音的额外请求归零。
+const REFRESH_OPTIONS = [
+  { value: 'auto', label: '自动' },
+  { value: '3',    label: '3 秒' },
+  { value: '5',    label: '5 秒' },
+  { value: '10',   label: '10 秒' },
+  { value: '30',   label: '30 秒' },
+  { value: '60',   label: '60 秒' },
+  { value: 'off',  label: '关闭' },
+];
+const REFRESH_KEY = 'chatRefresh';
+
+function chat() {
+  const base = {
+    REFRESH_OPTIONS,
+    contacts: CONTACTS,
+    peerUid: window.matchMedia('(min-width: 768px)').matches ? INIT_UID : '',
+    messages: INIT_MSGS,
+    unread: {},
+    q: '', draft: '',
+    sending: false, syncing: false, loadingMore: false,
+    hasMore: INIT_HAS_MORE,
+    live: false,
+    refresh: localStorage.getItem(REFRESH_KEY) || 'auto',
+    viewer: null,
+    _es: null,
+
+    get filtered() {
+      const q = this.q.trim().toLowerCase();
+      if (!q) return this.contacts;
+      return this.contacts.filter(c =>
+        (c.nickname || '').toLowerCase().includes(q) || (c.uid || '').includes(q));
+    },
+    get peer() { return this.contacts.find(c => c.uid === this.peerUid) || null; },
+
+    init() {
+      this.sortContacts();
+      this.$nextTick(() => this.toBottom());
+      this.connect();
+      // 首屏就要知道哪些联系人开了 AI —— 列表里的机器人徽标靠它渲染
+      this.loadAi();
+      // 页面藏起来时断开 SSE —— 服务端没人看就停轮询，不白给抖音打请求
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) this.disconnect();
+        else if (!this._es) this.connect();
+      });
+      window.addEventListener('beforeunload', () => this.disconnect());
+    },
+
+    setRefresh() {
+      localStorage.setItem(REFRESH_KEY, this.refresh);
+      // 频率是建连时带给服务端的，改了要重连才生效
+      this.disconnect();
+      this.connect();
+    },
+
+    connect() {
+      if (this._es || this.refresh === 'off') return;
+      const es = new EventSource(
+        `/api/messages/${ACC_ID}/stream?interval=${encodeURIComponent(this.refresh)}`);
+      this._es = es;
+      es.onopen = () => { this.live = true; };
+      es.onerror = () => {
+        this.live = false;
+        // EventSource 自带重连，这里只在被彻底关闭时兜底
+        if (es.readyState === EventSource.CLOSED) {
+          this._es = null;
+          setTimeout(() => {
+            if (!document.hidden && this.refresh !== 'off') this.connect();
+          }, 5000);
+        }
+      };
+      es.addEventListener('messages', e => {
+        let batch;
+        try { batch = JSON.parse(e.data); } catch { return; }
+        this.ingest(batch);
+      });
+    },
+
+    disconnect() {
+      if (this._es) { this._es.close(); this._es = null; }
+      this.live = false;
+    },
+
+    ingest(batch) {
+      const atBottom = this.nearBottom();
+      for (const m of batch) {
+        // 更新会话列表预览
+        const c = this.contacts.find(x => x.uid === m.peer_uid);
+        if (c) { c.last_text = m.text; c.last_ms = m.created_at; c.last_is_me = m.is_me; }
+
+        if (m.peer_uid === this.peerUid) this.merge(m);
+        else if (!m.is_me) this.unread[m.peer_uid] = (this.unread[m.peer_uid] || 0) + 1;
+      }
+      this.messages.sort((a, b) => a.created_at - b.created_at);
+      this.sortContacts();
+      // 只有原本就贴着底部才自动滚 —— 用户正在往上翻历史时别把他拽回去
+      if (atBottom) this.$nextTick(() => this.toBottom());
+    },
+
+    merge(m) {
+      // 已经有了就不重复加
+      const same = this.messages.findIndex(x => x.server_msg_id === m.server_msg_id);
+      if (same >= 0) { this.messages.splice(same, 1, m); return; }
+
+      // 我发出去的消息会先落一个负数 id 的临时气泡，几秒后抖音把真身同步回来。
+      // 服务端会带 replaces 指明替换谁；但连接中断重连时那条 replaces 可能没收到，
+      // 所以再兜一层：同为我发的、同文本的临时气泡一律换掉，而不是并排两条。
+      let temp = -1;
+      if (m.replaces !== undefined) {
+        temp = this.messages.findIndex(x => x.server_msg_id === m.replaces);
+      }
+      if (temp < 0 && m.is_me) {
+        temp = this.messages.findIndex(
+          x => x.is_me && x.server_msg_id < 0 && x.text === m.text);
+      }
+      if (temp >= 0) this.messages.splice(temp, 1, m);
+      else this.messages.push(m);
+    },
+
+    sortContacts() {
+      // 刚来消息的顶到最上面；没聊过的按火花天数排。
+      // 不重排的话，新消息来了联系人还待在原位，得自己去列表里翻。
+      this.contacts.sort((a, b) =>
+        (b.last_ms || 0) - (a.last_ms || 0) || (b.days || 0) - (a.days || 0));
+    },
+
+    async open(c) {
+      this.peerUid = c.uid;
+      delete this.unread[c.uid];
+      this.messages = [];
+      this.hasMore = false;
+      const r = await api(`/api/messages/${ACC_ID}/${c.uid}`);
+      if (r.ok) { this.messages = r.messages; this.hasMore = r.has_more; }
+      this.$nextTick(() => this.toBottom());
+    },
+
+    async loadMore() {
+      if (this.loadingMore || !this.hasMore || !this.messages.length) return;
+      this.loadingMore = true;
+      // 游标带上 id：同毫秒的消息只靠时间戳会在页边界被整条跳过
+      const first = this.messages[0];
+      const el = this.$refs.scroller;
+      const prevH = el.scrollHeight;
+      let url = `/api/messages/${ACC_ID}/${this.peerUid}?before=${first.created_at}`;
+      if (first.id) url += `&before_id=${first.id}`;
+      const r = await api(url);
+      if (r.ok) {
+        this.messages = [...r.messages, ...this.messages];
+        this.hasMore = r.has_more;
+        // 保持视口不跳：补进去多高就往下推多少
+        this.$nextTick(() => { el.scrollTop = el.scrollHeight - prevH; });
+      }
+      this.loadingMore = false;
+    },
+
+    onScroll() {
+      if (this.$refs.scroller.scrollTop < 60) this.loadMore();
+    },
+
+    nearBottom() {
+      const el = this.$refs.scroller;
+      if (!el) return true;
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    },
+
+    toBottom() {
+      const el = this.$refs.scroller;
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+
+    autoGrow() {
+      const el = this.$refs.input;
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 112) + 'px';
+    },
+
+    async send() {
+      const text = this.draft.trim();
+      if (!text || this.sending) return;
+      this.sending = true;
+      const r = await api('/api/send', 'POST',
+        { account_id: ACC_ID, uid: this.peerUid, text });
+      this.sending = false;
+      if (r.ok) {
+        this.draft = '';
+        this.$nextTick(() => this.autoGrow());
+        // 消息本体由 SSE 推回来（服务端发成功后立刻 broadcast），这里不手动插，
+        // 免得和推送的那条重复
+      } else {
+        toast(r.error || r.detail || '发送失败', 'err');
+      }
+    },
+
+    async syncNow() {
+      this.syncing = true;
+      await api(`/api/messages/${ACC_ID}/sync`, 'POST');
+      if (this.peerUid) {
+        const r = await api(`/api/messages/${ACC_ID}/${this.peerUid}`);
+        if (r.ok) { this.messages = r.messages; this.hasMore = r.has_more; }
+      }
+      this.syncing = false;
+      this.$nextTick(() => this.toBottom());
+    },
+
+    kindIcon(k) {
+      return { image: '🖼', audio: '🎤', share: '🔗', emoji: '😀' }[k] || '';
+    },
+
+    onCoverError(ev, m) {
+      const img = ev.target, md = m.media || {};
+      // 签名过期 → 换去签名版本再试一次；再挂就把整块封面藏掉
+      if (md.cover_alt && img.src !== md.cover_alt && !img.dataset.retried) {
+        img.dataset.retried = '1';
+        img.src = md.cover_alt;
+        return;
+      }
+      const box = img.closest('button');
+      if (box) box.style.display = 'none';
+    },
+
+    openMedia(m) {
+      const md = m.media;
+      if (!md) return;
+      if (md.kind === 'video') {
+        if (!md.vid) return;                       // 没 id 播不了，别开个空窗
+        this.viewer = {
+          kind: 'video',
+          src: `https://open.douyin.com/player/video?vid=${encodeURIComponent(md.vid)}&autoplay=0`,
+          page: `https://www.douyin.com/video/${encodeURIComponent(md.vid)}`,
+          text: m.text,
+        };
+      } else {
+        this.viewer = { kind: 'image', src: md.cover, text: '' };
+      }
+    },
+
+    closeMedia() { this.viewer = null; },
+    timeLabel(ms) {
+      return new Date(ms).toLocaleTimeString('zh-CN',
+        { hour: '2-digit', minute: '2-digit' });
+    },
+    /*
+      会话列表的时间，按微信/iMessage 那套惯例分档：
+      今天给具体时刻，最近一周给「昨天/周三」，再往前才给日期。
+      全都显示完整日期的话，一列全是「8月10日」，反而看不出谁最新。
+    */
+    listTimeLabel(ms) {
+      if (!ms) return '';
+      const d = new Date(ms), now = new Date();
+      const dayStart = t => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+      const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+      if (diffDays <= 0) return this.timeLabel(ms);
+      if (diffDays === 1) return '昨天';
+      if (diffDays < 7) return '周' + '日一二三四五六'[d.getDay()];
+      if (d.getFullYear() === now.getFullYear())
+        return `${d.getMonth() + 1}月${d.getDate()}日`;
+      return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+    },
+    dayLabel(ms) {
+      const d = new Date(ms), today = new Date();
+      const same = d.toDateString() === today.toDateString();
+      if (same) return '今天';
+      return d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
+    },
+    showDate(i) {
+      if (i === 0) return true;
+      const a = new Date(this.messages[i - 1].created_at).toDateString();
+      const b = new Date(this.messages[i].created_at).toDateString();
+      return a !== b;
+    },
+  };
+
+  /*
+    用描述符合并，不能写 `{...aiMixin()}`。
+
+    对象展开会**调用** getter 并把返回值当普通属性拷过来，
+    于是 peerAiOn / aiEnabledCount 在页面加载那一刻就被定死成 false / 0：
+      - 面板永远显示「0 位联系人生效」
+      - want = !this.peerAiOn 恒为 true，联系人开关只能开、关不掉
+    getOwnPropertyDescriptors 保留访问器本身，Alpine 的 Proxy 才追得到依赖。
+  */
+  return Object.defineProperties(
+    base, Object.getOwnPropertyDescriptors(aiMixin()));
+}
+</script>
+{% endblock %}

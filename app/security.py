@@ -3,7 +3,6 @@
 """
 import hmac
 import secrets
-from datetime import datetime, timedelta
 import bcrypt
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from .config import settings
@@ -33,19 +32,34 @@ _session_serializer = URLSafeTimedSerializer(settings.secret_key, salt="session"
 _csrf_serializer    = URLSafeTimedSerializer(settings.secret_key, salt="csrf")
 
 
-def issue_session(user_id: int) -> str:
-    """返回写入 cookie 的 session 值"""
-    return _session_serializer.dumps({"uid": user_id})
+def issue_session(user_id: int, version: int = 0) -> str:
+    """签发 session cookie。version 来自 User.session_version。"""
+    return _session_serializer.dumps({"uid": user_id, "v": version})
 
 
-def read_session(cookie_val: str | None) -> int | None:
+def read_session_full(cookie_val: str | None) -> tuple[int, int] | None:
+    """解出 (user_id, session_version)。
+
+    升级前签发的 cookie 没有 v 字段，按版本 0 处理 ——
+    否则上线瞬间会把所有在线用户踢下线。
+    """
     if not cookie_val:
         return None
     try:
         data = _session_serializer.loads(cookie_val, max_age=settings.session_max_age)
-        return int(data.get("uid", 0)) or None
-    except (BadSignature, SignatureExpired, ValueError, TypeError):
+        uid = int(data.get("uid", 0))
+        if not uid:
+            return None
+        return uid, int(data.get("v", 0))
+    except (BadSignature, SignatureExpired, ValueError, TypeError, AttributeError):
         return None
+
+
+def read_session(cookie_val: str | None) -> int | None:
+    """只取 user_id。注意：不校验 session_version，
+    需要完整校验请用 deps.resolve_session_user。"""
+    parsed = read_session_full(cookie_val)
+    return parsed[0] if parsed else None
 
 
 # ── CSRF Token ────────────────────────────────────────────────────────

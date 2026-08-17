@@ -1,0 +1,5 @@
+# 开发/CI 依赖（生产镜像不装这些）
+# 用法：pip install -r requirements.txt -r requirements-dev.txt
+pytest>=8.0
+httpx                  # fastapi.testclient 需要
+ruff>=0.6

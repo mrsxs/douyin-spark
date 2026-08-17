@@ -46,14 +46,19 @@
         <label class="label">手机号</label>
         <input x-model="mobile" class="input max-w-xs" placeholder="18812345678" />
       </div>
-      <button @click="sendSms()" class="btn-sec">发送验证码</button>
+      <button @click="sendSms()" class="btn-sec" :disabled="smsSending">
+        <span x-show="!smsSending">发送验证码</span>
+        <span x-show="smsSending" x-cloak>启动中…</span>
+      </button>
       <div x-show="smsStatus" x-text="smsStatus" class="text-sm" x-cloak></div>
       <div>
         <label class="label">6 位验证码</label>
-        <input x-model="code" class="input max-w-xs" maxlength="6" />
+        <input x-model="code" class="input max-w-xs" maxlength="6" inputmode="numeric"
+               @keydown.enter="smsReady && smsLogin()" />
       </div>
       <button @click="smsLogin()" class="btn-primary" x-bind:disabled="!smsReady">提交</button>
       <p class="text-xs text-slate-500 mt-2">点「发送验证码」后台启动浏览器发码（约 10 秒），提示"已发送"后再填验证码提交。整个登录在浏览器内完成，自动抓 cookies / init_req / 私钥，无需额外步骤。</p>
+      <p class="text-xs text-slate-500">收不到短信通常是抖音弹了安全验证（滑块）——此时会直接提示失败，可稍后重试或改用扫码登录。</p>
     </div>
   </div>
 </div>
@@ -62,22 +67,41 @@
 function loginFlow() {
   return {
     qrLoading: false, qrB64: '', qrMsg: '',
-    mobile: '', code: '', smsStatus: '', smsReady: false,
+    mobile: '', code: '', smsStatus: '', smsReady: false, smsSending: false,
     needSmsCode: false, maskedPhone: '', smsCode: '', submittingCode: false,
-    _pollTimer: null,
+    _pollTimer: null, _pollFn: null,
 
     init() {
-      // 页面卸载 / 路由离开 → 停掉轮询，避免后台空跑
       window.addEventListener('beforeunload', () => this._stopPoll());
+      // 页面隐藏时暂停轮询、回来立刻恢复并补查一次。
+      // 短信登录必然要切到短信 App 看验证码 —— 之前这里是永久 stopPoll，
+      // 切回来轮询再也不动，状态卡在「启动中…」且提交按钮一直禁用。
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden) this._stopPoll();
+        if (document.hidden) {
+          this._pausePoll();
+        } else if (this._pollFn) {
+          this._pollFn();            // 立即补一次，不用等下个周期
+          this._resumePoll();
+        }
       });
     },
-    _stopPoll() {
-      if (this._pollTimer) {
-        clearInterval(this._pollTimer);
-        this._pollTimer = null;
+    _startPoll(fn) {
+      this._stopPoll();
+      this._pollFn = fn;
+      fn();
+      this._pollTimer = setInterval(fn, 2000);
+    },
+    _pausePoll() {
+      if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    },
+    _resumePoll() {
+      if (!this._pollTimer && this._pollFn) {
+        this._pollTimer = setInterval(this._pollFn, 2000);
       }
+    },
+    _stopPoll() {
+      this._pausePoll();
+      this._pollFn = null;
     },
     async startQr() {
       this._stopPoll();
@@ -90,8 +114,7 @@ function loginFlow() {
       } finally { this.qrLoading = false; }
     },
     async poll() {
-      this._stopPoll();
-      this._pollTimer = setInterval(async () => {
+      this._startPoll(async () => {
         const r = await api('/api/login/qr/status?account_id={{ acc.id }}');
         if (r.status === 'success') {
           this._stopPoll();
@@ -110,7 +133,7 @@ function loginFlow() {
         } else {
           this.qrMsg = '状态: ' + (r.status || 'pending') + '（等待扫码）';
         }
-      }, 2000);
+      });
     },
     async submitSmsCode() {
       if (!this.smsCode) { toast('请输入验证码', 'err'); return; }
@@ -129,14 +152,18 @@ function loginFlow() {
     },
     async sendSms() {
       if (!this.mobile) { toast('请输入手机号','err'); return; }
+      this.smsSending = true;
+      this.smsReady = false;
       this.smsStatus = '启动中（后台浏览器发码，约 10 秒）...';
-      const r = await api('/api/login/sms/send-code', 'POST', {account_id: {{ acc.id }}, mobile: this.mobile});
-      if (!r.ok) { this.smsStatus = '✗ ' + (r.error || '失败'); return; }
-      this.pollSms();
+      try {
+        const r = await api('/api/login/sms/send-code', 'POST',
+                            {account_id: {{ acc.id }}, mobile: this.mobile});
+        if (!r.ok) { this.smsStatus = '✗ ' + (r.error || '失败'); return; }
+        this.pollSms();
+      } finally { this.smsSending = false; }
     },
     pollSms() {
-      this._stopPoll();
-      this._pollTimer = setInterval(async () => {
+      this._startPoll(async () => {
         const r = await api('/api/login/qr/status?account_id={{ acc.id }}');
         if (r.status === 'success') {
           this._stopPoll();
@@ -144,7 +171,9 @@ function loginFlow() {
           setTimeout(() => location.href = '/accounts/{{ acc.id }}', 1500);
         } else if (r.status === 'failed') {
           this._stopPoll();
-          this.smsStatus = '✗ ' + (r.error || '失败');
+          this.smsReady = false;
+          // 发码失败（滑块/风控/号码有误）后端现在会给出明确原因
+          this.smsStatus = '✗ ' + (r.error || '失败，请重试或改用扫码登录');
         } else if (r.status === 'waiting_sms_code') {
           this.smsReady = true;
           this.smsStatus = '✓ 验证码已发送，请在下方输入并提交';
@@ -153,7 +182,7 @@ function loginFlow() {
         } else {
           this.smsStatus = '启动中...';
         }
-      }, 2000);
+      });
     },
     async smsLogin() {
       if (!this.code) { toast('请输入验证码','err'); return; }
@@ -162,6 +191,7 @@ function loginFlow() {
       });
       if (r.ok) {
         this.smsStatus = '验证码已提交，正在登录...';
+        this._resumePoll();      // 提交后确保还在轮询，否则看不到结果
       } else {
         toast(r.error || '失败', 'err');
       }

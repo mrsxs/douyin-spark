@@ -2,6 +2,7 @@
 业务入口：给一个 (user_id, account_id) 做一次"续火花"。
 不依赖 HTTP context，可被 web 请求或 scheduler 调用。
 """
+import contextlib as _contextlib
 import json
 import os
 import random
@@ -13,6 +14,12 @@ from .storage import AccountCtx, set_account_ctx
 from .db import SessionLocal
 from .models import DouyinAccount, AuditLog, Schedule, JobRun, JobRunItem
 from .notify import notify
+# 模块级导入，不能只在函数里 import：_ensure_active 里也用到它。
+# 少了这行在纯 Python 下只是被 try/except 吞掉的 NameError（头像永远补不上，
+# dy_uid 也写不进去，静默失效）；而 cythonize 时是**编译错误**，
+# 会让整个 .so 编译失败 —— Dockerfile 那步又吞了退出码，
+# 结果就是镜像里一个 .so 都没有、全量源码明文发给客户。
+from . import contacts_service
 
 
 class NotReady(Exception):
@@ -36,6 +43,23 @@ def _get_account_lock(account_id: int) -> _threading.Lock:
             lock = _threading.Lock()
             _account_locks[account_id] = lock
         return lock
+
+
+@_contextlib.contextmanager
+def account_lock(account_id: int):
+    """非阻塞地占住账户锁；抢不到就 yield False。
+
+    给 AI 自动回复用：续火花批量任务正在跑的时候不该插进去发消息 ——
+    两条链路同时打同一个抖音号，等于把发送频率翻倍，直接踩风控。
+    抢不到就跳过这条回复，比排队等半分钟再发一条驴唇不对马嘴的回复要好。
+    """
+    lock = _get_account_lock(account_id)
+    acquired = lock.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
 
 
 def _adaptive_interval(account_id: int, base: float = 5.0) -> tuple[float, str]:
@@ -108,7 +132,7 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
                 if _acc and not _acc.avatar:
                     prof = dy.fetch_self_profile(session, my_uid)
                     if prof.get("avatar"):
-                        _acc.avatar = prof["avatar"]
+                        _acc.avatar = contacts_service.normalize_avatar_url(prof["avatar"])
                         changed = True
                         if prof.get("nickname") and not _acc.nickname:
                             _acc.nickname = prof["nickname"]
@@ -116,6 +140,20 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
                     _db.commit()
     except Exception as _e:
         print(f"[ensure_active] 写 self uid/avatar 失败: {_e}")
+    # 顺手解析聊天消息入库。
+    # init 响应里本来就带着每个会话最近 ~21 条消息 —— 复用同一份响应，
+    # 不额外请求抖音。解析失败只丢消息，不能连累拉联系人这个主流程。
+    try:
+        _my_uid = dy.extract_my_uid(resp.content)
+        _msgs = dy.parse_messages(resp.content, my_uid=_my_uid)
+        if _msgs:
+            from . import messages_service
+            with SessionLocal() as _db:
+                _added = messages_service.sync_messages(_db, ctx.account_id, _msgs)
+                _db.commit()
+            dy._log(f"[ensure_active] 消息同步: 解析 {len(_msgs)} 条，新增 {_added} 条", "INFO")
+    except Exception as _e:
+        print(f"[ensure_active] 消息同步失败（不影响联系人）: {_e}")
     # 合并缓存昵称
     try:
         cache = json.load(open(str(dy.CONTACTS_FILE)))
@@ -132,6 +170,42 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
     return session, constants, contacts
 
 
+def poll_new_messages(user_id: int, account_id: int) -> list[dict]:
+    """实时轮询专用：只打一次 init 拿新消息，返回本次新增的那些。
+
+    Why 不复用 _ensure_active：那条路会顺带补头像、拉昵称、upsert 联系人，
+    每次都跑一遍太重 —— 轮询几秒一次，只需要消息。
+
+    调用方（realtime 轮询线程）负责限频；这里不加锁，因为这是只读请求，
+    和续火花发送互不冲突，拿发送锁反而会让聊天在跑任务时卡死。
+    """
+    ctx = AccountCtx(user_id=user_id, account_id=account_id)
+    set_account_ctx(ctx)
+    if not os.path.exists(str(dy.COOKIE_FILE)) or not os.path.exists(str(dy.INIT_REQ_BIN)):
+        raise NotReady("账号未登录或缺少会话数据")
+    session = dy._load_session()
+    if not session:
+        raise NotReady("cookies 无效")
+    resp = session.post(
+        "https://imapi.douyin.com/v1/message/get_message_by_init",
+        data=open(str(dy.INIT_REQ_BIN), "rb").read(),
+        headers={**dy.HEADERS, "Content-Type": "application/x-protobuf"},
+        timeout=15,
+    )
+    if resp.status_code != 200 or len(resp.content) < 1024:
+        raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
+
+    my_uid = dy.extract_my_uid(resp.content)
+    msgs = dy.parse_messages(resp.content, my_uid=my_uid)
+    if not msgs:
+        return []
+    from . import messages_service
+    with SessionLocal() as db:
+        added = messages_service.sync_and_collect(db, account_id, msgs)
+        db.commit()
+    return added
+
+
 def get_contacts(user_id: int, account_id: int) -> tuple[list[dict], dict]:
     """给 Web 页面用：返回 contacts + templates（模板从 DB 读）"""
     ctx = AccountCtx(user_id=user_id, account_id=account_id)
@@ -145,10 +219,11 @@ def get_contacts(user_id: int, account_id: int) -> tuple[list[dict], dict]:
             templates = json.load(open(str(dy.TEMPLATES_FILE)))
         except Exception:
             templates = {}
-    # 同时 upsert 联系人缓存（跑一次就有 DB 快照，便于将来搜索/统计）
+    # 同时 upsert 联系人缓存（跑一次就有 DB 快照，首屏直接读它秒开）
     try:
+        from . import contacts_service
         with SessionLocal() as db:
-            templates_service.upsert_contact_cache(db, account_id, contacts)
+            contacts_service.upsert_cache(db, account_id, contacts)
             db.commit()
     except Exception as e:
         print(f"[trigger] 联系人缓存 upsert 失败: {e}")
@@ -161,26 +236,170 @@ def send_single(user_id: int, account_id: int, conv_id: str, contact: dict, text
     return dy.send_text(session, conv_id, text, contact, constants)
 
 
-def auto_run(user_id: int, account_id: int, triggered_by: str = "scheduler") -> dict:
-    """主流程：给所有启用的联系人按模板发一条。
-    账户级互斥：同一 account_id 不允许并发执行（scheduler + /api/auto 同时触发）。
+def send_to_uid(user_id: int, account_id: int, uid: str,
+                text: str) -> tuple[bool, dict | None]:
+    """按 uid 发一条消息，返回 (是否成功, 联系人)。
+
+    和「get_contacts() 找人 → send_single() 发」相比只打一次 _ensure_active。
+    那条路会拉两次联系人（各带一个 1.5MB 的 init 请求），手动发一条无所谓，
+    但 AI 自动回复是常态化触发的，翻倍的请求量就是翻倍的风控面。
+    """
+    ctx = AccountCtx(user_id=user_id, account_id=account_id)
+    session, constants, contacts = _ensure_active(ctx)
+    contact = next((c for c in contacts if c["uid"] == str(uid)), None)
+    if not contact:
+        return False, None
+    ok = dy.send_text(session, contact["conv_id"], text, contact, constants)
+    return bool(ok), contact
+
+
+def send_batch(user_id: int, account_id: int, uids: list[str], text: str,
+               run_id: int | None = None) -> dict:
+    """给一组 uid 发同一条消息。
+
+    和 auto_run 共用账户锁 —— 两者都在打同一个抖音号，
+    并发跑等于把发送频率翻倍，直接踩风控。
     """
     lock = _get_account_lock(account_id)
     if not lock.acquire(blocking=False):
         raise AlreadyRunning(f"账户 {account_id} 已有任务在执行，请等待上次完成")
     try:
-        return _auto_run_locked(user_id, account_id, triggered_by)
+        return _send_batch_locked(user_id, account_id, uids, text, run_id)
     finally:
         lock.release()
 
 
-def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
-    # 先建 JobRun，确保任何异常都能被记账（便于 scheduler 判断"今日失败次数"）
+def _send_batch_locked(user_id: int, account_id: int, uids: list[str],
+                       text: str, run_id: int | None) -> dict:
+    if run_id is None:
+        with SessionLocal() as db:
+            run = JobRun(douyin_account_id=account_id, kind="manual_batch",
+                         triggered_by="user", status="running", total=len(uids))
+            db.add(run); db.commit(); db.refresh(run)
+            run_id = run.id
+    else:
+        with SessionLocal() as db:
+            r = db.get(JobRun, run_id)
+            if r and not r.total:
+                r.total = len(uids)
+                db.commit()
+
+    ctx = AccountCtx(user_id=user_id, account_id=account_id)
+    session, constants, contacts = _ensure_active(ctx)
+    by_uid = {c["uid"]: c for c in contacts}
+
+    results, sent, failed = [], 0, 0
+    interval, risk = _adaptive_interval(account_id, base=5.0)
+    dy._log(f"[batch] send interval = {interval}s ({risk})", "RATE")
+
+    for i, uid in enumerate(uids):
+        c = by_uid.get(str(uid))
+        if not c:
+            failed += 1
+            results.append({"uid": uid, "ok": False, "detail": "联系人不存在"})
+            _write_item(run_id, str(uid), None, None, text, False, "联系人不存在")
+            continue
+        if i > 0:
+            time.sleep(interval + random.uniform(-0.5, 0.5))
+        try:
+            ok = bool(dy.send_text(session, c["conv_id"], text, c, constants))
+            detail = format_send_detail(dy.get_last_send_info())
+        except Exception as e:
+            ok, detail = False, f"exception: {e}"
+        sent += 1 if ok else 0
+        failed += 0 if ok else 1
+        results.append({"uid": uid, "nickname": c.get("nickname"),
+                        "ok": ok, "detail": detail})
+        _write_item(run_id, str(uid), c.get("nickname"), c.get("conv_id"),
+                    text, ok, detail)
+
     with SessionLocal() as db:
-        run = JobRun(douyin_account_id=account_id, kind="auto",
-                     triggered_by=triggered_by, status="running")
-        db.add(run); db.commit(); db.refresh(run)
-        run_id = run.id
+        r = db.get(JobRun, run_id)
+        if r:
+            r.finished_at = datetime.utcnow()
+            r.sent, r.failed, r.status = sent, failed, "done"
+        db.add(AuditLog(actor_user_id=user_id, actor_kind="user",
+                        action="send_batch", target_type="account",
+                        target_id=str(account_id),
+                        meta=json.dumps({"count": len(uids), "sent": sent,
+                                         "failed": failed, "run_id": run_id})))
+        db.commit()
+    return {"sent": sent, "failed": failed, "results": results,
+            "run_id": run_id}
+
+
+def _write_item(run_id: int, uid: str, nickname: str | None,
+                conv_id: str | None, message: str, ok: bool, detail: str) -> None:
+    """每条独立提交 —— 进度查询靠 COUNT(JobRunItem) 得到实时 done 值。"""
+    try:
+        with SessionLocal() as db:
+            db.add(JobRunItem(job_run_id=run_id, uid=uid, nickname=nickname,
+                              conv_id=conv_id, message=message,
+                              ok=ok, detail=(detail or "")[:1000]))
+            db.commit()
+    except Exception as e:
+        print(f"[batch] 写 JobRunItem 失败: {e}")
+
+
+def format_send_detail(info: dict) -> str:
+    """把 dy.get_last_send_info() 拼成人话（原在 routers/api.py）。"""
+    if not info:
+        return "无响应信息"
+    if info.get("ok"):
+        extras = info.get("extras") or {}
+        if extras:
+            return f"服务端返回 OK（extras={extras}）"
+        return "服务端返回 OK"
+    stage = info.get("stage")
+    if stage == "no_private_key":
+        return info.get("error") or "缺少私钥，需要重新扫码登录"
+    if stage == "no_ticket":
+        return info.get("error") or "联系人 ticket 缺失（init_req 漏抓），需重新登录"
+    if stage == "exception":
+        return f"请求异常: {info.get('error')}"
+    parts = []
+    http = info.get("http")
+    if http is not None and http != 200:
+        parts.append(f"HTTP {http}")
+    msg = info.get("msg")
+    if msg and msg != "OK":
+        parts.append(f"message={msg}")
+    edesc = info.get("error_desc")
+    if edesc and edesc not in ("", "0"):
+        parts.append(f"error_desc={edesc}")
+    if info.get("extras"):
+        parts.append(f"extras={info['extras']}")
+    if info.get("parse_error"):
+        parts.append(f"解析失败: {info['parse_error']}")
+    return " | ".join(parts) or "未知失败（见后端日志）"
+
+
+def auto_run(user_id: int, account_id: int, triggered_by: str = "scheduler",
+             run_id: int | None = None) -> dict:
+    """主流程：给所有启用的联系人按模板发一条。
+    账户级互斥：同一 account_id 不允许并发执行（scheduler + /api/auto 同时触发）。
+
+    run_id 已存在时复用该行（HTTP 层为了立刻把 id 返回给前端会先建好），
+    否则自己创建 —— scheduler 走的就是后一条路径。
+    """
+    lock = _get_account_lock(account_id)
+    if not lock.acquire(blocking=False):
+        raise AlreadyRunning(f"账户 {account_id} 已有任务在执行，请等待上次完成")
+    try:
+        return _auto_run_locked(user_id, account_id, triggered_by, run_id)
+    finally:
+        lock.release()
+
+
+def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
+                     run_id: int | None = None) -> dict:
+    # 先建 JobRun，确保任何异常都能被记账（便于 scheduler 判断"今日失败次数"）
+    if run_id is None:
+        with SessionLocal() as db:
+            run = JobRun(douyin_account_id=account_id, kind="auto",
+                         triggered_by=triggered_by, status="running")
+            db.add(run); db.commit(); db.refresh(run)
+            run_id = run.id
 
     try:
         ctx = AccountCtx(user_id=user_id, account_id=account_id)
@@ -215,6 +434,17 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
         skipped += len(broken)
         dy._log(f"[auto] 跳过 {len(broken)} 个需重燃（火花已断）联系人", "INFO")
     contacts = [c for c in contacts if c.get("status", "active") == "active"]
+    # 回填进度分母：启动时还不知道要发几个（得先调抖音 API），
+    # 前端在 total==0 期间显示「准备中」，拿到这里的值后才有百分比。
+    try:
+        with SessionLocal() as db:
+            r = db.get(JobRun, run_id)
+            if r:
+                r.total = len(contacts)
+                r.skipped = skipped
+                db.commit()
+    except Exception as _e:
+        print(f"[auto] 回填 total 失败: {_e}")
     # 基于近期失败率自适应限速；随机 ±0.5s jitter 更像人工操作
     SEND_INTERVAL, _risk_level = _adaptive_interval(account_id, base=5.0)
     dy._log(f"[auto] send interval = {SEND_INTERVAL}s ({_risk_level})", "RATE")
@@ -324,7 +554,6 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str) -> dict:
 
         # 今日累计失败达到上限 → 发一次邮件通知（每账户每日最多一封）
         if final_status == "error":
-            from datetime import timedelta
             from .models import Notification
             # "今日"按本地自然日计算（与 scheduler._loop 保持一致）
             _now_local = datetime.now()

@@ -22,10 +22,20 @@ COPY lib/            lib/
 COPY templates/      templates/
 COPY setup_ext.py run.py douyin_im.py ./
 
+# ⭐ 关闭开发用的 SKIP_LICENSE_CHECK 后门，再编译进 license.so
+# 必须在 cythonize 之前做；替换后立即断言，避免 sed 静默失配导致保护失效
+RUN sed -i 's/^_ALLOW_SKIP_LICENSE = True  # BUILD_FLAG$/_ALLOW_SKIP_LICENSE = False  # BUILD_FLAG/' app/license.py \
+    && grep -qx '_ALLOW_SKIP_LICENSE = False  # BUILD_FLAG' app/license.py \
+    && echo "[build] SKIP_LICENSE_CHECK 已在镜像中关闭"
+
 # 编译成 .so，然后删除所有被编译的 .py 源文件（除保留列表）
-RUN python setup_ext.py build_ext --inplace 2>&1 | tail -20 && \
+#
+# ⚠️ 不要在这条命令里加管道（如 `| tail -20`）：管道会把退出码换成最后一个
+# 命令的，cythonize 编译失败会被静默吞掉，构建照样 DONE，
+# 结果是镜像里一个 .so 都没有、全量源码明文发给客户。实际踩过这个坑。
+RUN python setup_ext.py build_ext --inplace && \
     python - <<'PYEOF'
-import os, pathlib
+import os, pathlib, sys
 KEEP = {
     "run.py",
     "app/__init__.py",
@@ -37,6 +47,28 @@ KEEP = {
     "app/cli.py",
     "app/routers/__init__.py",
 }
+# 编译失败就绝不能继续打包。cythonize 本身的退出码已经拦一道，
+# 这里再按「关键模块必须存在 .so」核一遍 —— 保护失效必须是构建期红灯，
+# 而不是等客户拿到镜像才发现源码是明文的。
+MUST_COMPILE = ["app/license.py", "app/csrf_mw.py", "app/trigger.py", "douyin_im.py"]
+
+
+def compiled(rel: str) -> bool:
+    """有没有编出对应的 .so。
+
+    不能硬编码 `cpython-313-x86_64-linux-gnu.so`：ABI 标签跟 Python 版本
+    和 CPU 架构走，arm64 机器上编出来的是 aarch64，硬编码会一个都匹配不上，
+    于是源码全部留在镜像里 —— 同样是静默失效。用 glob 按文件名前缀找。
+    """
+    p = pathlib.Path(rel)
+    return any(p.parent.glob(p.stem + "*.so"))
+
+
+missing = [m for m in MUST_COMPILE if not compiled(m)]
+if missing:
+    sys.exit(f"[build] ✗ 这些模块没有编译产物，拒绝打包: {missing}")
+
+deleted = 0
 for p in pathlib.Path(".").rglob("*.py"):
     rel = str(p).replace("\\", "/")
     if rel in KEEP:
@@ -46,17 +78,15 @@ for p in pathlib.Path(".").rglob("*.py"):
     if rel == "setup_ext.py":
         # 构建脚本不用留在运行镜像
         p.unlink(); print("deleted:", rel); continue
-    # 检查是否有对应的 .so
-    so = rel[:-3] + ".cpython-313-x86_64-linux-gnu.so"
-    if pathlib.Path(so).exists() or pathlib.Path(rel[:-3] + ".so").exists():
-        p.unlink(); print("deleted:", rel)
+    if compiled(rel):
+        p.unlink(); deleted += 1
 # 清理 .c 中间文件
 for c in pathlib.Path(".").rglob("*.c"):
     c.unlink()
 # 清理 build/ 目录
 import shutil
 shutil.rmtree("build", ignore_errors=True)
-print("cleanup done")
+print(f"[build] ✓ 已删除 {deleted} 个已编译的 .py 源文件")
 PYEOF
 
 

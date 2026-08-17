@@ -1,60 +1,100 @@
 {% extends "base.html" %}
 {% block title %}运行历史 · {{ acc.label }}{% endblock %}
 {% block content %}
-<div class="mb-6">
-  <div class="text-sm text-slate-500"><a href="/accounts/{{ acc.id }}" class="hover:underline">← {{ acc.nickname or acc.label }}</a></div>
-  <h1 class="text-2xl font-bold mt-1">运行历史</h1>
-  <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">定时触发 / 手动续火花 / 批量测试发送的全部执行记录（最近 {{ per_page }} 条，共 {{ total }}）</p>
+
+<div class="flex items-center gap-3 mb-5">
+  <a href="/accounts/{{ acc.id }}"
+     class="shrink-0 w-9 h-9 rounded-full bg-ios-fill2 dark:bg-slate-700 hover:bg-ios-fill3 flex items-center justify-center text-ios-label2"
+     aria-label="返回">
+    <iconify-icon icon="lucide:arrow-left" width="18" height="18"></iconify-icon>
+  </a>
+  <div class="min-w-0">
+    <h1 class="text-xl font-bold text-ios-label dark:text-slate-100 truncate">运行历史</h1>
+    <p class="text-xs text-ios-label3 truncate">{{ acc.nickname or acc.label }} · 共 {{ total }} 条</p>
+  </div>
 </div>
 
+{% macro result_bits(r) %}
+  <span class="text-ios-green font-medium">✓{{ r.sent }}</span>
+  {% if r.skipped %}<span class="text-ios-label3">跳过 {{ r.skipped }}</span>{% endif %}
+  {% if r.failed %}<span class="text-ios-red font-medium">✗{{ r.failed }}</span>{% endif %}
+{% endmacro %}
+
+{% macro kind_chip(kind) %}
+  {% if kind == "auto" %}<span class="apple-chip-blue">自动</span>
+  {% elif kind == "manual_single" %}<span class="apple-chip-gray">单发</span>
+  {% elif kind == "manual_batch" %}<span class="apple-chip-tint">批量</span>
+  {% else %}<span class="apple-chip-gray">{{ kind }}</span>{% endif %}
+{% endmacro %}
+
+{% macro status_chip(status) %}
+  {% if status == "running" %}
+    <span class="apple-chip-tint">
+      <iconify-icon icon="lucide:loader-2" width="11" height="11" class="animate-spin"></iconify-icon>
+      运行中
+    </span>
+  {% elif status == "done" %}
+    <span class="apple-chip-green"><iconify-icon icon="lucide:check" width="11" height="11"></iconify-icon>完成</span>
+  {% else %}
+    <span class="apple-chip-red"><iconify-icon icon="lucide:x" width="11" height="11"></iconify-icon>{{ status }}</span>
+  {% endif %}
+{% endmacro %}
+
 {% if runs %}
-<div class="card overflow-x-auto -mx-4 sm:mx-0 sm:rounded-xl">
-  <table class="w-full min-w-[720px]">
-    <thead class="bg-slate-50 dark:bg-slate-700/30 text-xs uppercase text-slate-500">
+<!-- 手机：卡片列表（宽表格在小屏没法看） -->
+<div class="space-y-2.5 sm:hidden">
+  {% for r in runs %}
+  {% set dur = ((r.finished_at - r.started_at).total_seconds() | int) if r.finished_at else None %}
+  <a href="/accounts/{{ acc.id }}/runs/{{ r.id }}"
+     class="apple-card-solid p-4 block active:scale-[0.99] transition">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="flex items-center gap-2">
+        {{ kind_chip(r.kind) }}
+        {{ status_chip(r.status) }}
+      </div>
+      <span class="text-xs text-ios-label3 shrink-0">#{{ r.id }}</span>
+    </div>
+    <div class="flex items-center justify-between gap-2 text-sm">
+      <div class="flex items-center gap-2">{{ result_bits(r) }}</div>
+      <div class="text-xs text-ios-label3 shrink-0">
+        {{ r.started_at.strftime("%m-%d %H:%M") }}{% if dur is not none %} · {{ dur }}s{% endif %}
+      </div>
+    </div>
+    {% if r.error %}
+    <div class="mt-2 text-xs text-ios-red truncate" title="{{ r.error }}">{{ r.error }}</div>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+
+<!-- 桌面：表格 -->
+<div class="apple-card-solid overflow-hidden hidden sm:block">
+  <table class="w-full">
+    <thead class="bg-ios-fill2 dark:bg-slate-700/30 text-xs text-ios-label3 font-medium">
       <tr>
-        <th class="px-4 py-3 text-left w-14">#</th>
-        <th class="px-4 py-3 text-left w-32">开始时间</th>
-        <th class="px-4 py-3 text-left w-24">类型</th>
-        <th class="px-4 py-3 text-left w-20">触发</th>
-        <th class="px-4 py-3 text-center w-20">状态</th>
-        <th class="px-4 py-3 text-center">结果</th>
-        <th class="px-4 py-3 text-left w-20">耗时</th>
+        <th class="px-4 py-2.5 text-left w-16">#</th>
+        <th class="px-4 py-2.5 text-left w-36">开始时间</th>
+        <th class="px-4 py-2.5 text-left w-24">类型</th>
+        <th class="px-4 py-2.5 text-left w-24">触发</th>
+        <th class="px-4 py-2.5 text-center w-28">状态</th>
+        <th class="px-4 py-2.5 text-center">结果</th>
+        <th class="px-4 py-2.5 text-left w-20">耗时</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+    <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-sm">
       {% for r in runs %}
       {% set dur = ((r.finished_at - r.started_at).total_seconds() | int) if r.finished_at else None %}
-      <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/20 cursor-pointer"
+      <tr class="hover:bg-ios-fill2/50 dark:hover:bg-slate-700/20 cursor-pointer"
           onclick="location.href='/accounts/{{ acc.id }}/runs/{{ r.id }}'">
-        <td class="px-4 py-3 text-sm text-slate-500">#{{ r.id }}</td>
-        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-400">{{ r.started_at.strftime("%m-%d %H:%M:%S") }}</td>
-        <td class="px-4 py-3">
-          {% if r.kind == "auto" %}
-            <span class="pill pill-indigo">自动</span>
-          {% elif r.kind == "manual_single" %}
-            <span class="pill pill-slate">单发</span>
-          {% elif r.kind == "manual_batch" %}
-            <span class="pill pill-amber">批量</span>
-          {% else %}
-            <span class="pill pill-slate">{{ r.kind }}</span>
-          {% endif %}
-        </td>
-        <td class="px-4 py-3 text-sm text-slate-500">{{ r.triggered_by }}</td>
+        <td class="px-4 py-3 text-ios-label3 font-mono text-xs">#{{ r.id }}</td>
+        <td class="px-4 py-3 text-ios-label2 font-mono text-xs">{{ r.started_at.strftime("%m-%d %H:%M:%S") }}</td>
+        <td class="px-4 py-3">{{ kind_chip(r.kind) }}</td>
+        <td class="px-4 py-3 text-ios-label3 text-xs">{{ r.triggered_by }}</td>
+        <td class="px-4 py-3 text-center">{{ status_chip(r.status) }}</td>
         <td class="px-4 py-3 text-center">
-          {% if r.status == "running" %}
-            <span class="pill pill-amber">运行中</span>
-          {% elif r.status == "done" %}
-            <span class="pill pill-green">完成</span>
-          {% else %}
-            <span class="pill pill-rose">{{ r.status }}</span>
-          {% endif %}
+          <span class="inline-flex items-center gap-2">{{ result_bits(r) }}</span>
         </td>
-        <td class="px-4 py-3 text-center text-sm">
-          <span class="text-emerald-600 dark:text-emerald-400">✓{{ r.sent }}</span>
-          {% if r.skipped %}<span class="text-slate-400 ml-2">跳过{{ r.skipped }}</span>{% endif %}
-          {% if r.failed %}<span class="text-rose-600 dark:text-rose-400 ml-2">✗{{ r.failed }}</span>{% endif %}
-        </td>
-        <td class="px-4 py-3 text-sm text-slate-500">{{ dur }}s{% if dur is none %}—{% endif %}</td>
+        <td class="px-4 py-3 text-ios-label3 text-xs">{% if dur is not none %}{{ dur }}s{% else %}—{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -62,18 +102,29 @@
 </div>
 
 {% if total > per_page %}
-<div class="mt-4 flex justify-center gap-2 text-sm">
+{% set total_pages = (total / per_page) | round(0, 'ceil') | int %}
+<div class="mt-5 flex items-center justify-center gap-2 text-sm">
   {% if page > 1 %}
-    <a href="?page={{ page - 1 }}" class="btn-sec">← 上一页</a>
+    <a href="?page={{ page - 1 }}" class="apple-btn-sec">← 上一页</a>
+  {% else %}
+    <span class="apple-btn-sec opacity-40 cursor-not-allowed">← 上一页</span>
   {% endif %}
-  <span class="px-4 py-2 text-slate-500">第 {{ page }} 页，共 {{ (total / per_page)|round(0, 'ceil')|int }} 页</span>
+  <span class="px-3 py-2 text-ios-label3">第 {{ page }} / {{ total_pages }} 页</span>
   {% if page * per_page < total %}
-    <a href="?page={{ page + 1 }}" class="btn-sec">下一页 →</a>
+    <a href="?page={{ page + 1 }}" class="apple-btn-sec">下一页 →</a>
+  {% else %}
+    <span class="apple-btn-sec opacity-40 cursor-not-allowed">下一页 →</span>
   {% endif %}
 </div>
 {% endif %}
 
 {% else %}
-<div class="card p-12 text-center text-slate-500">暂无运行记录</div>
+<div class="apple-card-solid p-12 text-center">
+  <div class="w-14 h-14 mx-auto rounded-2xl bg-ios-fill3 dark:bg-slate-700 flex items-center justify-center mb-3">
+    <iconify-icon icon="lucide:history" width="26" height="26" class="text-ios-label3"></iconify-icon>
+  </div>
+  <h3 class="font-semibold text-ios-label dark:text-slate-100 mb-1">还没有运行记录</h3>
+  <p class="text-sm text-ios-label3">点「立即续火花」或开启每日定时后，这里会显示每次执行的明细</p>
+</div>
 {% endif %}
 {% endblock %}

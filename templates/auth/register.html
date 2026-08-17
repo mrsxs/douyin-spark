@@ -15,6 +15,7 @@
       {% elif error == "password_mismatch" %}两次密码不一致
       {% elif error == "username_taken" %}用户名已被占用
       {% elif error == "email_taken" %}邮箱已被占用
+      {% elif error == "rate_limited" %}操作过于频繁，请稍等一分钟再试
       {% else %}未知错误{% endif %}
     </div>
     {% endif %}

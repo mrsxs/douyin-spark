@@ -1,5 +1,11 @@
-{# 闲鱼购买 CTA：所有需要推销的地方 {% include '_buy_cta.html' %} 即可 #}
-<a href="https://m.tb.cn/h.iJuxIwu?tk=zsii5SFLkY9%20HU287" target="_blank" rel="noopener noreferrer"
+{# 闲鱼购买 CTA。
+   链接在后台 /admin/site 配置；没配则整块不渲染 ——
+   客户自用部署时不该看到卖家的推广位。
+   用法：{% include '_buy_cta.html' %}
+#}
+{% set _cfg = site_cfg() %}
+{% if _cfg.xianyu_url %}
+<a href="{{ _cfg.xianyu_url }}" target="_blank" rel="noopener noreferrer"
    class="block group relative overflow-hidden rounded-xl bg-gradient-to-br from-amber-400 via-orange-500 to-rose-500 p-5 text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5">
   {# 右上角红色价格标签 #}
   <div class="absolute top-0 right-0 bg-white/95 text-rose-600 px-3 py-1 rounded-bl-xl shadow font-bold text-sm">
@@ -14,7 +20,9 @@
       </div>
       <div class="text-base font-bold leading-tight">抖音自动续火花 · 不用再被朋友骂啦</div>
       <div class="text-xs mt-1 opacity-95">自研产品 · 靠谱稳定 · 操作简单 · 省心省力</div>
-      <div class="text-xs mt-1 opacity-80">点击跳转闲鱼 · 口令 HU287</div>
+      <div class="text-xs mt-1 opacity-80">
+        点击跳转闲鱼{% if _cfg.xianyu_note %} · {{ _cfg.xianyu_note }}{% endif %}
+      </div>
     </div>
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.2" stroke="currentColor"
          class="w-6 h-6 opacity-80 group-hover:translate-x-1 transition shrink-0 self-center">
@@ -22,3 +30,4 @@
     </svg>
   </div>
 </a>
+{% endif %}

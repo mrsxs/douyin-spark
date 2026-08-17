@@ -52,10 +52,25 @@ def init_db():
         "ON notifications(user_id, read_at)",
         "CREATE INDEX IF NOT EXISTS idx_schedule_enabled_time "
         "ON schedules(enabled, time_hhmm)",
+        # 聊天页按 (账号, 对方) 倒序翻页，没这个索引会全表扫
+        "CREATE INDEX IF NOT EXISTS idx_chatmsg_acc_peer_time "
+        "ON chat_messages(douyin_account_id, peer_uid, created_ms)",
     ]
     # 幂等加列：SQLite 没 IF NOT EXISTS，try/except
     add_columns = [
         ("douyin_accounts", "avatar", "VARCHAR(512)"),
+        ("job_runs", "total", "INTEGER DEFAULT 0"),
+        ("users", "session_version", "INTEGER DEFAULT 0"),
+        # 首屏改读 Contact 冷备后，渲染需要头像和火花状态
+        ("contacts", "avatar", "VARCHAR(512)"),
+        ("contacts", "status", "VARCHAR(16) DEFAULT 'active'"),
+        # 聊天里内嵌视频封面/图片
+        ("chat_messages", "media", "TEXT"),
+        # AI 回复策略搬到界面上可编辑（老库里这张表已经建过，create_all 不会补列）
+        ("ai_reply_configs", "decline_policy", "TEXT DEFAULT ''"),
+        ("ai_reply_configs", "fewshot", "TEXT DEFAULT ''"),
+        # 老库里已有的行要默认开着思考，保持升级前后行为一致
+        ("ai_reply_configs", "thinking", "BOOLEAN DEFAULT 1"),
     ]
     with engine.begin() as conn:
         for sql in ddl:
@@ -83,7 +98,6 @@ def _migrate_templates_json():
     import json
     from .models import DouyinAccount, MessageTemplate
     from .storage import AccountCtx
-    import douyin_im as dy
 
     with SessionLocal() as db:
         accounts = db.query(DouyinAccount).all()

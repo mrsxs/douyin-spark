@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal
 from .models import MessageTemplate, DouyinAccount
 from .storage import AccountCtx
-import douyin_im as dy
 
 
 def load_templates(account_id: int) -> dict:
@@ -88,20 +87,10 @@ def sync_json_backup(account_id: int) -> None:
 
 
 def upsert_contact_cache(db: Session, account_id: int, contacts: list[dict]) -> None:
-    """把 trigger 取到的 contacts 写入 Contact 缓存表（upsert）"""
-    from .models import Contact
-    from datetime import datetime
-    existing = {c.uid: c for c in db.query(Contact).filter(
-        Contact.douyin_account_id == account_id).all()}
-    for c in contacts:
-        uid = c.get("uid")
-        if not uid:
-            continue
-        row = existing.get(uid)
-        if not row:
-            row = Contact(douyin_account_id=account_id, uid=uid)
-            db.add(row)
-        row.nickname = c.get("nickname")
-        row.conv_id = c.get("conv_id")
-        row.days = c.get("days")
-        row.last_synced_at = datetime.utcnow()
+    """已迁移到 app/contacts_service.upsert_cache。
+
+    保留此别名仅为兼容可能的外部调用；新代码请直接用 contacts_service，
+    它会一并写入 avatar / status（首屏冷备渲染需要这两个字段）。
+    """
+    from . import contacts_service
+    contacts_service.upsert_cache(db, account_id, contacts)

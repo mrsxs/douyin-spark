@@ -17,6 +17,7 @@ import html
 from urllib.parse import parse_qs, urlparse
 
 from .security import issue_csrf, verify_csrf, constant_time_equals
+from .license import assert_licensed
 
 
 def _safe_referer(referer: str) -> str:
@@ -112,10 +113,9 @@ class CSRFMiddleware:
         静态/健康检查路径直接跳过避免每请求查 DB。
         未读数使用 15s 短缓存，大幅减少 Notification count 查询。
         """
-        from .security import read_session
-        from .deps import SESSION_COOKIE
+        from .deps import SESSION_COOKIE, resolve_session_user
         from .db import SessionLocal
-        from .models import User, Notification
+        from .models import Notification
 
         scope.setdefault("state", {})
         scope["state"]["user"] = None
@@ -133,14 +133,11 @@ class CSRFMiddleware:
         if not session_val:
             return
         try:
-            uid = read_session(session_val)
-            if not uid:
-                return
             with SessionLocal() as db:
-                u = db.query(User).filter(User.id == uid,
-                                          User.is_active == True).first()
+                u = resolve_session_user(db, session_val)
                 if not u:
                     return
+                uid = u.id
                 scope["state"]["user"] = u
                 db.expunge(u)
                 # 未读数缓存：命中则直接用，避免频繁 count
@@ -162,6 +159,10 @@ class CSRFMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        # License 兜底：本模块是 cythonize 过的，而 run.py / app/main.py 是明文。
+        # 改掉明文入口跳过启动校验的话，会在这里被拦下。
+        assert_licensed()
 
         # 先做 user 注入 — 这样下游路由即使是 GET 也能拿到 request.state.user
         await self._inject_user(scope)

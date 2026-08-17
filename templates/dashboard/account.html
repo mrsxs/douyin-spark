@@ -39,27 +39,29 @@
         </div>
       </div>
     </div>
-    <div class="flex flex-wrap items-center gap-2">
-      <button @click="runAutoConfirm=true" class="apple-btn-tint" :disabled="running">
+    <!-- 移动端横向滚动，避免 5 个按钮挤成两三行 -->
+    <div class="flex items-center gap-2 overflow-x-auto -mx-1 px-1 pb-1
+                sm:flex-wrap sm:overflow-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <button @click="runAutoConfirm=true" class="apple-btn-tint shrink-0" :disabled="running">
         <iconify-icon icon="lucide:flame" width="16" height="16"></iconify-icon>
         <span x-show="!running">立即续火花</span>
         <span x-show="running">运行中…</span>
       </button>
-      <button @click="batchSend()" class="apple-btn-sec" :disabled="batchRunning">
+      <button @click="batchSend()" class="apple-btn-sec shrink-0" :disabled="batchRunning">
         <iconify-icon icon="lucide:send" width="15" height="15"></iconify-icon>
         <span x-show="!batchRunning">批量发送<span x-show="selectedCount>0" x-text="' ('+selectedCount+')'"></span></span>
         <span x-show="batchRunning">发送中…</span>
       </button>
-      <button @click="refreshContacts()" class="apple-btn-sec">
-        <iconify-icon icon="lucide:refresh-cw" width="15" height="15"></iconify-icon>
-        刷新
-      </button>
-      <button @click="checkCookies()" class="apple-btn-sec" :disabled="checking">
+      <button @click="checkCookies()" class="apple-btn-sec shrink-0" :disabled="checking">
         <iconify-icon icon="lucide:shield-check" width="15" height="15"></iconify-icon>
         <span x-show="!checking">体检</span>
         <span x-show="checking">体检中…</span>
       </button>
-      <a href="/accounts/{{ acc.id }}/runs" class="apple-btn-sec">
+      <a href="/accounts/{{ acc.id }}/chat" class="apple-btn-sec shrink-0">
+        <iconify-icon icon="lucide:message-circle" width="15" height="15"></iconify-icon>
+        聊天
+      </a>
+      <a href="/accounts/{{ acc.id }}/runs" class="apple-btn-sec shrink-0">
         <iconify-icon icon="lucide:history" width="15" height="15"></iconify-icon>
         历史
       </a>
@@ -108,6 +110,53 @@
       </div>
     </div>
     <div class="mt-2 text-2xl font-bold {% if broken_total %}text-ios-red{% else %}text-ios-label3{% endif %}">{{ broken_total }}</div>
+  </div>
+</div>
+
+<!-- 后台任务进度条：/api/auto 与 /api/send-batch 立即返回 run_id 后在这里轮询 -->
+<div x-show="job.open" x-cloak x-transition
+     class="apple-card-solid p-4 mb-5 border-ios-tint/30">
+  <div class="flex items-center gap-3">
+    <div class="w-9 h-9 rounded-xl bg-ios-tintBg flex items-center justify-center shrink-0">
+      <iconify-icon x-show="!job.finished" icon="lucide:loader-2" width="18" height="18"
+                    class="text-ios-tint animate-spin"></iconify-icon>
+      <iconify-icon x-show="job.finished && !job.error" icon="lucide:circle-check" width="18" height="18"
+                    class="text-ios-green" x-cloak></iconify-icon>
+      <iconify-icon x-show="job.finished && job.error" icon="lucide:circle-alert" width="18" height="18"
+                    class="text-ios-red" x-cloak></iconify-icon>
+    </div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-sm font-semibold text-ios-label dark:text-slate-100" x-text="job.label"></span>
+        <span class="text-xs text-ios-label3 shrink-0">
+          <template x-if="job.total > 0">
+            <span><span x-text="job.done"></span> / <span x-text="job.total"></span></span>
+          </template>
+          <template x-if="job.total === 0 && !job.finished">
+            <span>准备中…</span>
+          </template>
+        </span>
+      </div>
+      <div class="mt-2 w-full bg-ios-fill3 dark:bg-slate-700 rounded-full h-1.5 overflow-hidden">
+        <div class="h-1.5 rounded-full transition-all duration-500"
+             :class="job.error ? 'bg-ios-red' : (job.finished ? 'bg-ios-green' : 'bg-ios-tint')"
+             :style="`width: ${job.total ? job.percent : 8}%`"></div>
+      </div>
+      <div class="mt-1.5 flex items-center gap-3 text-xs">
+        <span class="text-ios-green">✓ <span x-text="job.sent"></span></span>
+        <span class="text-ios-label3" x-show="job.skipped">跳过 <span x-text="job.skipped"></span></span>
+        <span class="text-ios-red" x-show="job.failed">✗ <span x-text="job.failed"></span></span>
+        <span class="text-ios-label3 ml-auto" x-show="!job.finished">每 5 秒发一条，可离开页面</span>
+        <a x-show="job.finished" x-cloak :href="`/accounts/{{ acc.id }}/runs/${job.runId}`"
+           class="ml-auto text-ios-blue hover:underline">查看详情 →</a>
+      </div>
+      <div x-show="job.error" x-cloak class="mt-1.5 text-xs text-ios-red" x-text="job.error"></div>
+    </div>
+    <button x-show="job.finished" x-cloak @click="job.open=false"
+            class="shrink-0 w-7 h-7 rounded-full bg-ios-fill3 dark:bg-slate-700 flex items-center justify-center text-ios-label2"
+            aria-label="关闭">
+      <iconify-icon icon="lucide:x" width="14" height="14"></iconify-icon>
+    </button>
   </div>
 </div>
 
@@ -161,9 +210,41 @@
            class="input !pl-9 !rounded-xl !bg-ios-fill2 !border-transparent" />
   </form>
   {% if q %}<a href="/accounts/{{ acc.id }}" class="btn-ghost text-sm">清除</a>{% endif %}
-  <div class="ml-auto text-sm text-ios-label3 whitespace-nowrap">
-    共 <span class="font-semibold text-ios-label dark:text-slate-100">{{ full_total }}</span> 人
+  <div class="ml-auto flex items-center gap-2 text-sm text-ios-label3 whitespace-nowrap">
+    <span>共 <span class="font-semibold text-ios-label dark:text-slate-100">{{ full_total }}</span> 人</span>
+    <!-- 数据新鲜度：首屏是冷备，后台刷新完会变 -->
+    <span x-show="syncing" x-cloak class="inline-flex items-center gap-1 text-ios-blue">
+      <iconify-icon icon="lucide:loader-2" width="12" height="12" class="animate-spin"></iconify-icon>
+      同步中
+    </span>
+    <button x-show="!syncing" @click="refreshContacts()" x-cloak
+            class="inline-flex items-center gap-1 hover:text-ios-blue transition" title="重新从抖音拉取">
+      <iconify-icon icon="lucide:refresh-cw" width="12" height="12"></iconify-icon>
+      <span x-text="syncedLabel"></span>
+    </button>
   </div>
+</div>
+
+<!-- 骨架屏：没有任何冷备数据且正在首次同步时显示 -->
+<div x-show="showSkeleton" x-cloak class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 mb-4">
+  <template x-for="i in 6" :key="i">
+    <div class="apple-card-solid p-4 animate-pulse">
+      <div class="flex items-start gap-3">
+        <div class="w-4 h-4 rounded bg-ios-fill3 dark:bg-slate-700 mt-1"></div>
+        <div class="w-11 h-11 rounded-full bg-ios-fill3 dark:bg-slate-700"></div>
+        <div class="flex-1 space-y-2 pt-1">
+          <div class="h-3 w-24 rounded bg-ios-fill3 dark:bg-slate-700"></div>
+          <div class="h-2.5 w-16 rounded bg-ios-fill3 dark:bg-slate-700"></div>
+        </div>
+        <div class="w-11 h-6 rounded-full bg-ios-fill3 dark:bg-slate-700"></div>
+      </div>
+      <div class="mt-3 h-12 rounded-xl bg-ios-fill3 dark:bg-slate-700"></div>
+      <div class="mt-3 flex justify-between">
+        <div class="h-3 w-16 rounded bg-ios-fill3 dark:bg-slate-700"></div>
+        <div class="h-3 w-20 rounded bg-ios-fill3 dark:bg-slate-700"></div>
+      </div>
+    </div>
+  </template>
 </div>
 
 {# 联系人卡 macro：按 Pencil 设计稿（R1 行 + 橙色 Panel 大天数 + R3 操作行） #}
@@ -558,9 +639,16 @@
           <div class="text-xs font-semibold" style="color:#1C1C1E">扫码也来续火花</div>
           <div class="text-[10px]" style="color:#AEAEB2">和好友一起守护每天的火花</div>
         </div>
-        <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:#E9E9EB">
-          <iconify-icon icon="lucide:qr-code" width="26" height="26" style="color:#6E6E73"></iconify-icon>
-        </div>
+        {# 二维码指向后台配置的站点域名；没配则退回占位图标 #}
+        <template x-if="shareModal.qrDataUrl">
+          <img :src="shareModal.qrDataUrl" alt="站点二维码"
+               class="w-10 h-10 rounded-lg" />
+        </template>
+        <template x-if="!shareModal.qrDataUrl">
+          <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:#E9E9EB">
+            <iconify-icon icon="lucide:qr-code" width="26" height="26" style="color:#6E6E73"></iconify-icon>
+          </div>
+        </template>
       </div>
     </div>
     <div x-show="shareModal.busy" x-cloak class="mt-3 text-xs text-ios-label3 flex items-center gap-1.5">
@@ -592,10 +680,103 @@ function accountPage() {
     checking: false,
     runAutoConfirm: false,
     selectedCount: 0,
+    // 联系人同步状态（首屏渲染冷备，后台异步拉最新）
+    syncing: false,
+    syncedAt: {{ (synced_at_iso | tojson) if synced_at_iso else 'null' }},
+    contactCount: {{ full_total }},
+    // 首屏那份冷备的指纹，同步回来后比对，变了就重渲染
+    _snapshot: {{ contacts_snapshot | tojson }},
+    // 后台任务进度（/api/auto 和 /api/send-batch 都立即返回 run_id，这里轮询）
+    job: { open:false, runId:null, label:'', total:0, done:0, sent:0,
+           failed:0, skipped:0, percent:0, finished:false, error:null },
+    _poll: null,
     sendModal: { open:false, sending:false, text:'', status:'', targets:[], results:[] },
-    shareModal: { open:false, busy:false, name:'', days:0, avatar:'', date:'', startDate:'' },
+    shareModal: { open:false, busy:false, name:'', days:0, avatar:'', date:'', startDate:'', qrDataUrl:'' },
     tplModal:   { open:false, uid:'', name:'', days:0, avatar:'', enabled:false, messages:[] },
-    init() { window._accountPage = this; },
+    init() {
+      window._accountPage = this;
+      // 页面刷新后若仍有任务在跑，自动接管进度条
+      const saved = sessionStorage.getItem('job_run_{{ acc.id }}');
+      if (saved) this.trackJob(parseInt(saved, 10), '进行中的任务');
+      // 首屏渲染的是 DB 冷备，加载完再异步拉最新覆盖
+      {% if acc.status == 'active' and acc.cookies_exist and not finalizing %}
+      this.syncContacts();
+      {% endif %}
+    },
+    get showSkeleton() { return this.syncing && this.contactCount === 0; },
+    get syncedLabel() {
+      if (!this.syncedAt) return '未同步';
+      const diff = (Date.now() - new Date(this.syncedAt).getTime()) / 1000;
+      if (diff < 60) return '刚刚同步';
+      if (diff < 3600) return `${Math.floor(diff/60)} 分钟前`;
+      if (diff < 86400) return `${Math.floor(diff/3600)} 小时前`;
+      return `${Math.floor(diff/86400)} 天前`;
+    },
+    // —— 联系人异步同步（首屏不阻塞）——
+    async syncContacts(force) {
+      if (this.syncing) return;
+      this.syncing = true;
+      try {
+        const r = await api(`/api/contacts/{{ acc.id }}?refresh=1`);
+        if (!r.ok) {
+          if (r.error) toast('同步失败：' + r.error, 'err');
+          return;
+        }
+        this.syncedAt = r.synced_at;
+        const fresh = r.contacts || [];
+        // 首屏渲染的是同步前的冷备快照。拿到新数据后必须重新渲染，
+        // 否则用户看到的天数/头像/已消失的好友全是旧的 —— 页面看着像坏了。
+        if (force || this._snapshotStale(fresh)) {
+          location.reload();
+          return;
+        }
+        this.contactCount = fresh.length;
+      } finally { this.syncing = false; }
+    },
+    // 服务端渲染时的快照，用来判断刷新后数据有没有变
+    _snapshotStale(fresh) {
+      if (fresh.length !== this.contactCount) return true;
+      const now = {};
+      for (const c of fresh) now[c.uid] = `${c.days}|${c.status}|${c.avatar ? 1 : 0}`;
+      for (const uid in this._snapshot) {
+        if (this._snapshot[uid] !== now[uid]) return true;
+      }
+      return Object.keys(now).length !== Object.keys(this._snapshot).length;
+    },
+    // —— 任务进度轮询 ——
+    trackJob(runId, label) {
+      Object.assign(this.job, {open:true, runId, label, total:0, done:0, sent:0,
+                               failed:0, skipped:0, percent:0, finished:false, error:null});
+      sessionStorage.setItem('job_run_{{ acc.id }}', runId);
+      this.stopPoll();
+      this.pollOnce();
+      this._poll = setInterval(() => this.pollOnce(), 2000);
+    },
+    stopPoll() { if (this._poll) { clearInterval(this._poll); this._poll = null; } },
+    async pollOnce() {
+      if (!this.job.runId) return;
+      const r = await api(`/api/runs/${this.job.runId}/progress`);
+      if (!r.ok) {                       // 任务不存在/越权/掉线 → 停止轮询
+        this.stopPoll();
+        sessionStorage.removeItem('job_run_{{ acc.id }}');
+        this.job.open = false;
+        return;
+      }
+      Object.assign(this.job, {
+        total: r.total, done: r.done, sent: r.sent, failed: r.failed,
+        skipped: r.skipped, percent: r.percent, finished: r.finished, error: r.error,
+      });
+      if (r.finished) {
+        this.stopPoll();
+        sessionStorage.removeItem('job_run_{{ acc.id }}');
+        this.running = false;
+        this.batchRunning = false;
+        toast(r.status === 'error'
+              ? `任务失败：${r.error || '见运行历史'}`
+              : `完成：送达 ${r.sent}，跳过 ${r.skipped}，失败 ${r.failed}`,
+              r.status === 'error' ? 'err' : 'ok');
+      }
+    },
     openSend(targets) {
       Object.assign(this.sendModal, {open:true, sending:false, text:'', status:'', results:[], targets});
     },
@@ -607,31 +788,39 @@ function accountPage() {
       this.sendModal.results = [];
       try {
         if (this.sendModal.targets.length === 1) {
+          // 单发是同步的（只有一条，不会超时）
           const t = this.sendModal.targets[0];
           const r = await api('/api/send', 'POST', {account_id: {{ acc.id }}, uid: t.uid, text});
           this.sendModal.results = [{uid: t.uid, nickname: t.name, ok: r.ok, detail: r.detail || r.error || ''}];
           this.sendModal.status = r.ok ? '✓ 已送达（' + (r.detail || '服务端 OK') + '）' : '✗ ' + (r.detail || r.error || '失败');
         } else {
+          // 批量走后台任务：每条间隔 5s，同步请求必然超时
           const uids = this.sendModal.targets.map(t => t.uid);
           const r = await api('/api/send-batch', 'POST', {account_id: {{ acc.id }}, uids, text});
-          if (!r.ok) this.sendModal.status = '✗ ' + (r.error || '失败');
-          else { this.sendModal.results = r.results || []; this.sendModal.status = `完成：送达 ${r.sent}，失败 ${r.failed}`; }
+          if (!r.ok) { this.sendModal.status = '✗ ' + (r.error || '失败'); }
+          else {
+            this.sendModal.open = false;
+            this.batchRunning = true;
+            this.trackJob(r.run_id, `批量发送 ${uids.length} 人`);
+            if (!r.started) toast('该账号已有任务在执行，已切换到那个进度');
+          }
         }
       } catch (e) { this.sendModal.status = '✗ 前端异常: ' + (e && e.message || e); }
       finally { this.sendModal.sending = false; }
     },
     async runAuto() {
       this.running = true;
-      try {
-        const r = await api('/api/auto', 'POST', {account_id: {{ acc.id }}});
-        if (r.ok) toast(`已送 ${r.sent}，跳过 ${r.skipped}，失败 ${r.failed}`);
-        else toast(r.error || '失败', 'err');
-      } finally { this.running = false; }
+      const r = await api('/api/auto', 'POST', {account_id: {{ acc.id }}});
+      if (r.ok) {
+        this.trackJob(r.run_id, '续火花');
+        if (!r.started) toast('该账号已有任务在执行，已切换到那个进度');
+      } else {
+        this.running = false;
+        toast(r.error || '失败', 'err');
+      }
     },
     async refreshContacts() {
-      const r = await api('/api/refresh', 'POST', {account_id: {{ acc.id }}});
-      if (r.ok) { toast('刷新成功，正在重载…'); setTimeout(()=>location.reload(), 600); }
-      else toast(r.error || '失败', 'err');
+      await this.syncContacts(true);
     },
     async checkCookies() {
       this.checking = true;
@@ -678,6 +867,7 @@ function accountPage() {
         open: true, busy: false, name, days, avatar: avatar || '',
         date: `${d.getFullYear()}.${pad(d.getMonth()+1)}.${pad(d.getDate())}`,
         startDate: fmt(start),
+        qrDataUrl: SHARE_QR_URL,
       };
     },
     async _renderImage() {
@@ -715,6 +905,9 @@ function accountPage() {
 
 // 全局模板缓存（从后端注入，编辑后实时刷新）
 window.TPL_CACHE = {{ templates|tojson }};
+// 分享卡二维码：指向后台 /admin/site 配置的域名；没配则为空串，卡片显示占位图标
+// 必须走 tojson —— 直接写引号会被 Jinja autoescape 转成 &#39; 变成 JS 语法错误
+const SHARE_QR_URL = {{ (share_qr_data_url or '') | tojson }};
 let DEFAULT_MSGS = {{ (default_tpl.messages or [])|tojson }};
 function renderDefaultPreviews() {
   const text = DEFAULT_MSGS.length ? DEFAULT_MSGS.join('  /  ') : '（通用模板未设置，留空时不会发送）';

@@ -2,18 +2,21 @@
 JSON API：模板、定时、发送、立即续火花、联系人刷新。
 每个请求携带 account_id，deps 自动验证归属。
 """
+import asyncio
 import json
-import os
+import queue
+import time
 import traceback
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from ..db import get_db
+from ..db import get_db, SessionLocal
 from ..models import DouyinAccount, Schedule, AuditLog, Announcement, JobRun, JobRunItem, Notification
-from ..deps import require_active, get_account_owned
+from ..deps import require_active
 from ..storage import AccountCtx, set_account_ctx
-from .. import trigger
+from .. import trigger, jobs, contacts_service, messages_service, realtime
 import douyin_im as dy
 
 router = APIRouter(prefix="/api")
@@ -29,6 +32,175 @@ def _safe_err(e: Exception, fallback: str = "操作失败，请稍后重试") ->
         return str(e)[:200]
     # 其它（包括 sqlalchemy error、连接拒绝等）一律脱敏
     return fallback
+
+
+def _iso_utc(dt) -> str | None:
+    """带 Z 后缀的 ISO 时间。
+
+    DB 里存的是 naive UTC，直接 isoformat() 给前端的话
+    JS 的 new Date() 会当成本地时间解析 —— 刚同步完却显示「8 小时前」。
+    """
+    return dt.isoformat() + "Z" if dt else None
+
+
+@router.get("/contacts/{account_id}")
+def api_contacts(
+    account_id: int,
+    refresh: int = 0,
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """联系人列表。
+
+    默认读冷备（毫秒级）；refresh=1 时才走抖音 API 拉最新并回写冷备。
+    页面首屏渲染冷备，加载完再用 refresh=1 覆盖，避免白屏。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id,
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "账户不存在")
+
+    from .. import contacts_service
+    if not refresh:
+        rows = contacts_service.load_cached(db, acc.id)
+        synced = contacts_service.last_synced_at(db, acc.id)
+        return {"ok": True, "contacts": rows, "cached": True,
+                "synced_at": _iso_utc(synced)}
+
+    try:
+        rows, _tpl = trigger.get_contacts(user.id, acc.id)
+        # 补昵称/头像：不补的话抓不到名字的会显示成一长串 uid
+        filled = contacts_service.enrich_names_and_avatars(user.id, acc.id, rows)
+        # 全量刷新 → 清掉抖音那边已经没有的人，否则用户会一直看到早已消失的好友
+        contacts_service.upsert_cache(db, acc.id, rows, prune=True)
+        db.commit()
+        fresh = contacts_service.load_cached(db, acc.id)
+        return {"ok": True, "contacts": fresh, "cached": False,
+                "count": len(fresh), "filled": filled,
+                "synced_at": _iso_utc(datetime.utcnow())}
+    except Exception as e:
+        traceback.print_exc()
+        # 刷新失败时退回冷备，让页面至少有数据可用
+        return {"ok": False, "error": _safe_err(e),
+                "contacts": contacts_service.load_cached(db, acc.id),
+                "cached": True}
+
+
+# 注意路由顺序：/messages/{account_id}/stream 必须注册在 /{peer_uid} 之前。
+# FastAPI 按注册顺序匹配，反过来的话 "stream" 会被当成一个 peer_uid，
+# SSE 请求直接掉进读会话的接口，返回一坨 JSON 而不是事件流。
+
+@router.get("/messages/{account_id}/stream")
+async def api_messages_stream(
+    account_id: int,
+    request: Request,
+    interval: str = "auto",
+    user = Depends(require_active),
+):
+    """SSE 实时消息流。浏览器开着聊天页就连着，关掉就断。
+
+    interval 是用户在聊天页选的刷新秒数（或 auto 自适应），
+    非法值一律回落到自适应，并夹在 3~300 秒之间。
+
+    刻意不用 Depends(get_db)：StreamingResponse 会把依赖一直持有到流结束，
+    那样每条长连接都占住一个 DB 连接，几个人同时开聊天页就把连接池吃干净。
+    归属校验用一次性短会话做完就放掉。
+    """
+    with SessionLocal() as db:
+        acc = db.query(DouyinAccount).filter(
+            DouyinAccount.id == account_id,
+            DouyinAccount.user_id == user.id).first()
+        if not acc:
+            raise HTTPException(404, "账户不存在")
+        acc_id, uid = acc.id, user.id
+
+    poll_interval = realtime.normalize_interval(interval)
+
+    async def event_stream():
+        sub = realtime.subscribe(uid, acc_id, poll_interval)
+        last_beat = time.monotonic()
+        try:
+            yield f": connected acc={acc_id}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    batch = sub.get_nowait()
+                except queue.Empty:
+                    # 队列是进程内内存，0.5s 轮一次几乎不花开销，
+                    # 换来的是整条链路不用跨线程唤醒事件循环
+                    await asyncio.sleep(0.5)
+                    if time.monotonic() - last_beat > 20:
+                        last_beat = time.monotonic()
+                        yield ": ping\n\n"      # 心跳，防代理掐断闲置连接
+                    continue
+                last_beat = time.monotonic()
+                yield f"event: messages\ndata: {json.dumps(batch, ensure_ascii=False)}\n\n"
+        finally:
+            realtime.unsubscribe(sub)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",     # nginx 默认会缓冲，SSE 必须关掉
+        },
+    )
+
+
+@router.get("/messages/{account_id}/{peer_uid}")
+def api_messages(
+    account_id: int, peer_uid: str,
+    limit: int = 50, before: int | None = None, before_id: int | None = None,
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """读某个联系人的聊天记录（纯冷备，毫秒级）。
+
+    往上翻历史时把上一页最早一条的 created_at + id 一起传回来 ——
+    只传时间戳的话，同毫秒的消息会在页边界被跳过。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id,
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "账户不存在")
+
+    limit = max(1, min(limit, 200))
+    rows = messages_service.load_conversation(
+        db, acc.id, peer_uid, limit=limit, before=before, before_id=before_id)
+    return {"ok": True, "messages": rows,
+            # 少于 limit 说明到头了，前端据此停止「加载更多」
+            "has_more": len(rows) >= limit}
+
+
+@router.post("/messages/{account_id}/sync")
+def api_messages_sync(
+    account_id: int,
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """主动同步一次消息。
+
+    走的还是拉联系人那条链路（get_contacts → _ensure_active），
+    消息在里面顺带解析入库 —— 不额外请求抖音。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id,
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "账户不存在")
+    try:
+        trigger.get_contacts(user.id, acc.id)
+        return {"ok": True, "synced_at": _iso_utc(datetime.utcnow())}
+    except Exception as e:
+        traceback.print_exc()
+        return {"ok": False, "error": _safe_err(e)}
+
+
 
 
 @router.post("/refresh")
@@ -53,7 +225,7 @@ def api_refresh(
                 if session and need_self_avatar:
                     self_prof = dy.fetch_self_profile(session, acc.dy_uid)
                     if self_prof.get("avatar"):
-                        acc.avatar = self_prof["avatar"]
+                        acc.avatar = contacts_service.normalize_avatar_url(self_prof["avatar"])
                         if self_prof.get("nickname") and not acc.nickname:
                             acc.nickname = self_prof["nickname"]
                         db.commit()
@@ -61,7 +233,8 @@ def api_refresh(
                     captured = dy.fetch_nicknames(session, missing)
                     if captured:
                         # 合并写 contacts.json 缓存（原子写）
-                        import os as _os, tempfile as _tf
+                        import os as _os
+                        import tempfile as _tf
                         cache_path = str(dy.CONTACTS_FILE)
                         try:
                             existing = json.load(open(cache_path)) if _os.path.exists(cache_path) else {}
@@ -125,49 +298,43 @@ def api_auto(
     user = Depends(require_active),
     db: Session = Depends(get_db),
 ):
+    """触发续火花。立即返回 run_id，真正的发送在后台线程里跑。
+
+    Why 不同步执行：每个联系人间隔 5s，100 个联系人就是 500 秒，
+    同步请求必然超时，还会占满 FastAPI 的同步 threadpool 拖垮整站。
+    """
     acc = _get_acc(payload, user, db)
     try:
-        r = trigger.auto_run(user.id, acc.id, triggered_by="user")
-        return {"ok": True, **r}
-    except trigger.AlreadyRunning as e:
-        return {"ok": False, "error": _safe_err(e)}
+        run_id, is_new = jobs.start_auto_run(user.id, acc.id)
+        return {"ok": True, "run_id": run_id, "started": is_new,
+                "message": "已开始续火花" if is_new else "该账号已有任务在执行"}
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": _safe_err(e)}
 
 
+@router.get("/runs/{run_id}/progress")
+def api_run_progress(
+    run_id: int,
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """任务进度轮询端点。"""
+    p = jobs.get_progress(db, run_id)
+    if not p:
+        raise HTTPException(404, "任务不存在")
+    # 越权保护：只能看自己账号下的任务
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == p["account_id"],
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "任务不存在")
+    return {"ok": True, **p}
+
+
 def _format_send_detail(info: dict) -> str:
-    """把 dy.get_last_send_info() 拼成人话"""
-    if not info:
-        return "无响应信息"
-    if info.get("ok"):
-        # extras 非空说明抖音在 OK 响应里夹带了风控/限流码，是 shadowban 的强信号
-        extras = info.get("extras") or {}
-        if extras:
-            return f"服务端返回 OK（extras={extras}）"
-        return "服务端返回 OK"
-    stage = info.get("stage")
-    if stage == "no_private_key":
-        return info.get("error") or "缺少私钥，需要重新扫码登录"
-    if stage == "no_ticket":
-        return info.get("error") or "联系人 ticket 缺失（init_req 漏抓），需重新登录"
-    if stage == "exception":
-        return f"请求异常: {info.get('error')}"
-    msg = info.get("msg")
-    edesc = info.get("error_desc")
-    http = info.get("http")
-    parts = []
-    if http is not None and http != 200:
-        parts.append(f"HTTP {http}")
-    if msg and msg != "OK":
-        parts.append(f"message={msg}")
-    if edesc and edesc not in ("", "0"):
-        parts.append(f"error_desc={edesc}")
-    if info.get("extras"):
-        parts.append(f"extras={info['extras']}")
-    if info.get("parse_error"):
-        parts.append(f"解析失败: {info['parse_error']}")
-    return " | ".join(parts) or "未知失败（见后端日志）"
+    """兼容别名 —— 实现已下沉到 trigger.format_send_detail。"""
+    return trigger.format_send_detail(info)
 
 
 @router.post("/send")
@@ -204,6 +371,17 @@ def api_send(
         db.add(AuditLog(actor_user_id=user.id, actor_kind="user", action="send_manual",
                         target_type="account", target_id=str(acc.id),
                         meta=json.dumps({"uid": uid, "ok": ok, "run_id": run.id})))
+        # 发成功就立刻写进聊天记录并推给自己的其它页面 ——
+        # 抖音的 server_message_id 要等下轮同步才有，不能让用户干等着
+        if ok:
+            try:
+                local = messages_service.append_local(
+                    db, acc.id, uid, text, conv_id=contact.get("conv_id"))
+                realtime.broadcast(acc.id, [local])
+                # 刚发完消息多半马上有回复，把轮询从退避里叫醒
+                realtime.wake(acc.id)
+            except Exception as _e:
+                print(f"[api_send] 写本地聊天记录失败: {_e}")
         db.commit()
         return {"ok": bool(ok), "detail": detail}
     except Exception as e:
@@ -217,67 +395,18 @@ def api_send_batch(
     user = Depends(require_active),
     db: Session = Depends(get_db),
 ):
-    """批量给一组 uid 发同一条消息。payload: {account_id, uids: [...], text}"""
-    import random
-    import time as _time
-    acc = _get_acc(payload, user, db)
-    uids = payload.get("uids") or []
-    text = (payload.get("text") or "").strip()
-    if not uids or not text:
-        return {"ok": False, "error": "缺少 uids/text"}
-    try:
-        contacts, _ = trigger.get_contacts(user.id, acc.id)
-        by_uid = {c["uid"]: c for c in contacts}
-        # 创建 JobRun
-        run = JobRun(douyin_account_id=acc.id, kind="manual_batch",
-                     triggered_by="user", status="running")
-        db.add(run); db.commit(); db.refresh(run)
-        run_id = run.id
+    """批量给一组 uid 发同一条消息。payload: {account_id, uids: [...], text}
 
-        results = []
-        sent = failed = 0
-        # 基于该账户近期失败率自适应限速
-        SEND_INTERVAL, _risk_level = trigger._adaptive_interval(acc.id, base=5.0)
-        for i, uid in enumerate(uids):
-            c = by_uid.get(str(uid))
-            if not c:
-                failed += 1
-                results.append({"uid": uid, "ok": False, "detail": "联系人不存在"})
-                db.add(JobRunItem(job_run_id=run_id, uid=str(uid),
-                                  message=text, ok=False, detail="联系人不存在"))
-                db.commit()
-                continue
-            if i > 0:
-                _time.sleep(SEND_INTERVAL + random.uniform(-0.5, 0.5))
-            try:
-                ok = trigger.send_single(user.id, acc.id, c["conv_id"], c, text)
-                detail = _format_send_detail(dy.get_last_send_info())
-            except Exception as e:
-                traceback.print_exc()
-                ok, detail = False, str(e)
-            results.append({"uid": uid, "nickname": c.get("nickname"),
-                            "ok": bool(ok), "detail": detail})
-            sent += 1 if ok else 0
-            failed += 0 if ok else 1
-            db.add(JobRunItem(
-                job_run_id=run_id, uid=str(uid), nickname=c.get("nickname"),
-                conv_id=c.get("conv_id"), message=text,
-                ok=bool(ok), detail=(detail or "")[:1000],
-            ))
-            db.commit()
-        # 收尾
-        run = db.get(JobRun, run_id)
-        run.finished_at = datetime.utcnow()
-        run.sent = sent; run.failed = failed
-        run.status = "done"
-        db.add(AuditLog(actor_user_id=user.id, actor_kind="user", action="send_batch",
-                        target_type="account", target_id=str(acc.id),
-                        meta=json.dumps({"count": len(uids),
-                                         "sent": sent, "failed": failed,
-                                         "run_id": run_id})))
-        db.commit()
-        return {"ok": True, "sent": sent, "failed": failed, "results": results,
-                "run_id": run_id}
+    同 /auto：立即返回 run_id，发送在后台跑（每条间隔 5s，同步会超时）。
+    """
+    acc = _get_acc(payload, user, db)
+    try:
+        run_id, is_new = jobs.start_batch_send(
+            user.id, acc.id, payload.get("uids") or [], payload.get("text") or "")
+        return {"ok": True, "run_id": run_id, "started": is_new,
+                "message": "已开始发送" if is_new else "该账号已有任务在执行"}
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": _safe_err(e)}

@@ -12,7 +12,7 @@ import io
 import csv
 
 from ..db import get_db
-from ..models import User, LicenseCode, DouyinAccount, AuditLog, Announcement, AppSetting
+from ..models import User, LicenseCode, DouyinAccount, AuditLog, Announcement, AppSetting, JobRun
 from ..deps import page_require_admin, require_admin
 from ..security import hash_password
 from ..notify import notify
@@ -38,10 +38,9 @@ def _broadcast_announcement(db: Session, ann: Announcement) -> int:
     return len(rows)
 
 
-@router.get("", response_class=HTMLResponse)
-def admin_home(request: Request, admin=Depends(page_require_admin), db: Session = Depends(get_db)):
+def _build_stats(db: Session) -> dict:
     now = datetime.utcnow()
-    stats = {
+    return {
         "users_total":    db.query(func.count(User.id)).scalar() or 0,
         "users_active":   db.query(func.count(User.id)).filter(User.expires_at > now).scalar() or 0,
         "codes_total":    db.query(func.count(LicenseCode.id)).scalar() or 0,
@@ -53,9 +52,45 @@ def admin_home(request: Request, admin=Depends(page_require_admin), db: Session 
             AuditLog.ts >= now.replace(hour=0, minute=0, second=0, microsecond=0)
         ).scalar() or 0,
     }
+
+
+def _build_trend(db: Session, days: int = 7) -> list[dict]:
+    """最近 N 天的每日触发次数，按本地自然日聚合。
+
+    JobRun.started_at 存的是 naive UTC，而管理员看的是本地日期，
+    所以按本地日边界换算成 UTC 区间来分桶。
+    """
+    WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    now_local = datetime.now()
+    tz_offset = now_local - datetime.utcnow()
+
+    out = []
+    for i in range(days - 1, -1, -1):
+        day_local = (now_local - timedelta(days=i)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        start_utc = day_local - tz_offset
+        end_utc = start_utc + timedelta(days=1)
+        count = (db.query(func.count(JobRun.id))
+                   .filter(JobRun.started_at >= start_utc,
+                           JobRun.started_at < end_utc)
+                   .scalar()) or 0
+        out.append({
+            "label": WEEKDAYS[day_local.weekday()],
+            "date": day_local.strftime("%Y-%m-%d"),
+            "value": count,
+        })
+    return out
+
+
+@router.get("", response_class=HTMLResponse)
+def admin_home(request: Request, admin=Depends(page_require_admin), db: Session = Depends(get_db)):
+    stats = _build_stats(db)
+    trend = _build_trend(db, days=7)
     recent_logs = (db.query(AuditLog).order_by(AuditLog.ts.desc()).limit(20).all())
     return request.app.state.tmpl.TemplateResponse("admin/home.html", {
-        "request": request, "admin": admin, "stats": stats, "logs": recent_logs,
+        "request": request, "admin": admin, "stats": stats,
+        "trend": trend, "trend_max": max((p["value"] for p in trend), default=0),
+        "logs": recent_logs,
     })
 
 
@@ -76,7 +111,7 @@ def admin_users(
     if status == "active":
         query = query.filter(User.is_active == True, User.expires_at > now)
     elif status == "expired":
-        query = query.filter(or_(User.expires_at == None, User.expires_at < now))
+        query = query.filter(or_(User.expires_at.is_(None), User.expires_at < now))
     elif status == "inactive":
         query = query.filter(User.is_active == False)
     total = query.count()
@@ -158,6 +193,8 @@ def admin_reset_password(
     if len(new_password) < 6:
         raise HTTPException(400, "密码过短")
     user.password_hash = hash_password(new_password)
+    # 让该用户已签发的所有 cookie 立即失效 —— 否则被盗号后改密码也踢不掉攻击者
+    user.session_version = (user.session_version or 0) + 1
     db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin", action="reset_password",
                     target_type="user", target_id=str(user.id)))
     db.commit()
@@ -418,6 +455,51 @@ def _save_smtp_cfg(db: Session, cfg: dict, admin_id: int) -> None:
     else:
         row.value = json.dumps(cfg)
         row.updated_by = admin_id
+
+
+@router.get("/site", response_class=HTMLResponse)
+def admin_site(
+    request: Request,
+    admin = Depends(page_require_admin), db: Session = Depends(get_db),
+):
+    from .. import site_settings
+    return request.app.state.tmpl.TemplateResponse("admin/site.html", {
+        "request": request, "admin": admin,
+        "cfg": site_settings.load(db),
+        "ok": request.query_params.get("ok"),
+        "error": request.query_params.get("error"),
+    })
+
+
+@router.post("/site")
+def admin_site_save(
+    request: Request,
+    site_url: str = Form(""),
+    xianyu_url: str = Form(""),
+    xianyu_note: str = Form(""),
+    admin = Depends(page_require_admin), db: Session = Depends(get_db),
+):
+    from .. import site_settings
+    try:
+        cfg = site_settings.save(db, {
+            "site_url": site_url,
+            "xianyu_url": xianyu_url,
+            "xianyu_note": xianyu_note,
+        }, admin.id)
+    except ValueError as e:
+        return RedirectResponse(f"/admin/site?error={e}", status_code=302)
+
+    db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
+                    action="site_update", target_type="app_setting",
+                    target_id="site",
+                    meta=json.dumps({"site_url": cfg["site_url"],
+                                     "has_xianyu": bool(cfg["xianyu_url"])})))
+    db.commit()
+    # 模板里的 site_cfg() 有 30s 缓存，保存后立刻失效，别让管理员以为没生效
+    invalidate = getattr(request.app.state, "invalidate_site_cfg", None)
+    if invalidate:
+        invalidate()
+    return RedirectResponse("/admin/site?ok=1", status_code=302)
 
 
 @router.get("/smtp", response_class=HTMLResponse)

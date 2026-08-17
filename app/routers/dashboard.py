@@ -1,21 +1,25 @@
 """
 用户主面板 + 单账户页面
 """
-import json
 import os
+import threading
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request, Form, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from ..db import get_db
-from ..models import User, DouyinAccount, Schedule, JobRun, JobRunItem
-from ..deps import page_require_active, page_require_user, get_account_owned, require_active
+from ..db import get_db, SessionLocal
+from ..models import DouyinAccount, Schedule, JobRun, JobRunItem
+from ..deps import page_require_active, page_require_user
 from ..storage import AccountCtx, set_account_ctx, delete_account_dir
-from ..config import settings
+from .. import templates_service, contacts_service
 import douyin_im as dy
 
 router = APIRouter()
+
+# 后台补头像的去重：同一批账户同时只跑一个线程
+_avatar_inflight: set = set()
+_avatar_lock = threading.Lock()
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -78,9 +82,7 @@ def _compute_health_one(acc: DouyinAccount, recent_runs: list, now: datetime) ->
 def _fill_missing_avatars(accounts: list[DouyinAccount], user_id: int, db: Session) -> None:
     """对 avatar 为空且能用 cookies 拉的账户，同步拉一次 self profile 写入。
 
-    Why: 用户进 dashboard 期望看到真实头像，而不是首字母 fallback。
-    How: 每个账户独立 try，失败/超时静默跳过——不阻塞 dashboard 渲染。
-    若 dy_uid 也缺失，先从已缓存的 init.bin 抽出来。
+    注意：这个函数会走网络，不要在请求路径里调用 —— 用 _schedule_avatar_fill。
     """
     targets = [a for a in accounts
                if not a.avatar and a.cookies_exist and a.status == "active"]
@@ -103,7 +105,7 @@ def _fill_missing_avatars(accounts: list[DouyinAccount], user_id: int, db: Sessi
                 continue
             prof = dy.fetch_self_profile(session, acc.dy_uid)
             if prof.get("avatar"):
-                acc.avatar = prof["avatar"]
+                acc.avatar = contacts_service.normalize_avatar_url(prof["avatar"])
                 changed = True
                 if prof.get("nickname") and not acc.nickname:
                     acc.nickname = prof["nickname"]
@@ -117,58 +119,34 @@ def _fill_missing_avatars(accounts: list[DouyinAccount], user_id: int, db: Sessi
             db.rollback()
 
 
-def _backfill_avatars_for_page(user_id: int, account_id: int, contacts_page: list[dict]) -> None:
-    """对本页缺头像的联系人，调一次 fetch_nicknames 写回缓存 + 注入返回结构。
+def _schedule_avatar_fill(account_ids: list[int], user_id: int) -> None:
+    """后台补账户头像。同一批只跑一个线程，跑完即退。
 
-    Why: 旧 contacts.json 缓存里只存了 nick/remark，没存 avatar 字段。
-    用户进 account 页时若发现一批可见联系人都没头像，懒加载补齐——
-    只补"本页可见的 30 个"，避免一次性抓 4000+ 个慢。
+    Why: 每个账户一次抖音 API 调用，串行放在请求里会让 /dashboard 白屏几秒；
+    头像不是关键信息，缺了有首字母 fallback，异步补齐足够。
     """
-    missing = [c for c in contacts_page
-               if not c.get("avatar") and c.get("sec_uid")]
-    if not missing:
+    if not account_ids:
         return
-    try:
-        set_account_ctx(AccountCtx(user_id, account_id))
-        session = dy._load_session()
-        if not session:
+    key = (user_id, tuple(sorted(account_ids)))
+    with _avatar_lock:
+        if key in _avatar_inflight:
             return
-        captured = dy.fetch_nicknames(session, missing)
-        if not captured:
-            return
-        # 合并写 contacts.json 缓存（原子写）
-        cache_path = str(dy.CONTACTS_FILE)
+        _avatar_inflight.add(key)
+
+    def worker():
         try:
-            existing = json.load(open(cache_path)) if os.path.exists(cache_path) else {}
-        except Exception:
-            existing = {}
-        for uid, info in captured.items():
-            prev = existing.get(uid) if isinstance(existing.get(uid), dict) else {}
-            merged = dict(prev) if isinstance(prev, dict) else {}
-            for k in ("nick", "remark", "avatar"):
-                if info.get(k):
-                    merged[k] = info[k]
-            existing[uid] = merged
-        # 原子写
-        import tempfile
-        cache_dir = os.path.dirname(cache_path) or "."
-        os.makedirs(cache_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=cache_dir, prefix=".tmp_", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(existing, f, ensure_ascii=False)
-                f.flush(); os.fsync(f.fileno())
-            os.replace(tmp_path, cache_path)
-        except Exception:
-            if os.path.exists(tmp_path): os.unlink(tmp_path)
-            raise
-        # 把 avatar 注入本页 contacts，让本次渲染就能看到
-        for c in contacts_page:
-            info = captured.get(c.get("uid"))
-            if info and info.get("avatar"):
-                c["avatar"] = info["avatar"]
-    except Exception as e:
-        print(f"[backfill_avatars] acc#{account_id} 失败: {e}")
+            with SessionLocal() as db:
+                accs = db.query(DouyinAccount).filter(
+                    DouyinAccount.id.in_(account_ids)).all()
+                _fill_missing_avatars(accs, user_id, db)
+        except Exception as e:
+            print(f"[dashboard] 后台补头像失败: {e}")
+        finally:
+            with _avatar_lock:
+                _avatar_inflight.discard(key)
+
+    threading.Thread(target=worker, daemon=True,
+                     name=f"avatar-fill-{user_id}").start()
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -181,8 +159,11 @@ def dashboard(request: Request, user=Depends(page_require_active), db: Session =
     remain_days = (user.expires_at - now).days if user.expires_at else 0
     # 一次聚合查询计算所有账户的健康状态（避免 N+1）
     health_map = _compute_health_map(accounts, db, now)
-    # 顺手为没有 avatar 的活跃账户拉一次 self profile（best-effort, 静默失败）
-    _fill_missing_avatars(accounts, user.id, db)
+    # 头像补齐要走抖音 API（每个账户一次网络请求），放后台线程别阻塞首屏。
+    # 拉到后写库，下次进来就有了。
+    _schedule_avatar_fill([a.id for a in accounts
+                           if not a.avatar and a.cookies_exist and a.status == "active"],
+                          user.id)
     return request.app.state.tmpl.TemplateResponse("dashboard/index.html", {
         "request": request,
         "user": user,
@@ -212,24 +193,31 @@ def account_page(
         sch = Schedule(douyin_account_id=acc.id, enabled=False, time_hhmm="09:00")
         db.add(sch); db.commit(); db.refresh(sch)
 
-    # 拉联系人 + 模板（若有问题显示 error 状态而不是崩溃）
-    contacts, templates, load_error = [], {}, None
-    finalizing = False   # True = cookies 已有但 init_req 还在后台抓（扫码加速后才出现）
+    # 首屏只读 Contact 冷备表 —— 纯 DB，毫秒级返回。
+    # 原本这里同步调 trigger.get_contacts()（抖音 API，15s timeout）
+    # 再叠一次头像补齐请求，白屏 5~20 秒，还占着同步 threadpool。
+    # 最新数据由前端加载后异步打 /api/contacts 刷新。
+    from .. import contacts_service, site_settings
+
+    contacts, load_error, finalizing = [], None, False
+    synced_at = None
     if acc.status == "active" and acc.cookies_exist:
         ctx = AccountCtx(user.id, acc.id)
         set_account_ctx(ctx)
-        if not os.path.exists(str(dy.INIT_REQ_BIN)):
+        contacts = contacts_service.load_cached(db, acc.id)
+        synced_at = contacts_service.last_synced_at(db, acc.id)
+        if not os.path.exists(str(dy.INIT_REQ_BIN)) and not contacts:
             finalizing = True
-        else:
-            try:
-                from .. import trigger
-                contacts, templates = trigger.get_contacts(user.id, acc.id)
-            except Exception as e:
-                msg = str(e)
-                if "init_req" in msg:
-                    finalizing = True
-                else:
-                    load_error = msg
+
+    # 首屏这份冷备的指纹（全量，不是分页后的）。
+    # 前端异步同步回来后拿它比对，数据变了才重渲染 —— 否则用户看到的
+    # 天数/头像/已消失的好友会一直停在打开页面那一刻的旧快照上。
+    contacts_snapshot = {
+        c["uid"]: f"{c.get('days')}|{c.get('status')}|{1 if c.get('avatar') else 0}"
+        for c in contacts
+    }
+
+    templates = templates_service.load_templates(acc.id)
 
     # 前端过滤 + 分页
     full_total = len(contacts)
@@ -247,8 +235,6 @@ def account_page(
     page = max(1, min(page, total_pages))
     start = (page - 1) * per_page
     contacts_page = contacts[start:start + per_page]
-    # 当本页联系人缺头像（旧 cache 未存 avatar）→ 同步拉一次写回（best-effort）
-    _backfill_avatars_for_page(user.id, acc.id, contacts_page)
 
     return request.app.state.tmpl.TemplateResponse("dashboard/account.html", {
         "request": request,
@@ -258,10 +244,67 @@ def account_page(
         "default_tpl": templates.get("default", {"enabled": True, "messages": ["早"]}),
         "load_error": load_error,
         "finalizing": finalizing,
+        "synced_at": synced_at,
+        # 带 Z：DB 存的是 naive UTC，不标时区 JS 会当本地时间，
+        # 刚同步完却显示「8 小时前」
+        "synced_at_iso": (synced_at.isoformat() + "Z") if synced_at else None,
+        "contacts_snapshot": contacts_snapshot,
+        # 分享卡二维码（服务端生成的 data URL，避免 html2canvas 跨域污染 canvas）
+        "share_qr_data_url": site_settings.qr_data_url(
+            site_settings.load(db).get("site_url", "")),
         "q": q, "page": page, "total_pages": total_pages,
         "full_total": full_total, "filtered_total": filtered_total,
         "active_total": active_total, "broken_total": broken_total,
         "per_page": per_page,
+        "now": datetime.now(),
+    })
+
+
+@router.get("/accounts/{account_id}/chat", response_class=HTMLResponse)
+def account_chat(
+    request: Request,
+    account_id: int,
+    uid: str = "",
+    user=Depends(page_require_active),
+    db: Session = Depends(get_db),
+):
+    """聊天页。首屏只读冷备（毫秒级），新消息由 SSE 推。"""
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id, DouyinAccount.user_id == user.id
+    ).first()
+    if not acc:
+        raise HTTPException(404)
+
+    from .. import contacts_service, messages_service
+
+    contacts = contacts_service.load_cached(db, acc.id)
+    last_map = messages_service.last_message_map(db, acc.id)
+
+    # 会话列表：有过聊天的排前面并按最后一条时间倒序，
+    # 没聊过的按火花天数排 —— 否则每次进来都要翻半天找人
+    for c in contacts:
+        last = last_map.get(c["uid"])
+        c["last_text"] = last["text"] if last else ""
+        c["last_ms"] = last["created_at"] if last else 0
+        c["last_is_me"] = last["is_me"] if last else False
+    contacts.sort(key=lambda c: (-c["last_ms"], -(c.get("days") or 0)))
+
+    active_uid = uid or (contacts[0]["uid"] if contacts else "")
+    limit = messages_service.DEFAULT_LIMIT
+    messages = (messages_service.load_conversation(db, acc.id, active_uid,
+                                                   limit=limit)
+                if active_uid else [])
+    peer = next((c for c in contacts if c["uid"] == active_uid), None)
+
+    return request.app.state.tmpl.TemplateResponse("dashboard/chat.html", {
+        "request": request,
+        "user": user, "acc": acc,
+        "contacts": contacts,
+        "active_uid": active_uid,
+        "peer": peer,
+        "messages": messages,
+        # 首屏就把「还有没有更早的」算准，前端别再拿条数去猜
+        "has_more": len(messages) >= limit,
         "now": datetime.now(),
     })
 

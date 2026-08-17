@@ -1,0 +1,42 @@
+{# 移动端底部 Tab 导航（md 以上隐藏，桌面用顶部 navbar）
+
+   目标用户多半用手机访问（闲鱼买家），顶部导航在小屏上够不着，
+   底部 Tab 是更符合手机习惯的主导航。
+#}
+{% set path = request.url.path %}
+<nav class="md:hidden fixed bottom-0 inset-x-0 z-30
+            bg-white/90 dark:bg-slate-800/90 backdrop-blur-xl
+            border-t border-ios-sep dark:border-slate-700
+            pb-[env(safe-area-inset-bottom)]">
+  <div class="grid grid-cols-3">
+    {% set tabs = [
+      ('/dashboard', 'flame', '火花', path.startswith('/dashboard') or path.startswith('/accounts')),
+      ('#notifications', 'bell', '通知', False),
+      ('/activate', 'user-round', '我的', path.startswith('/activate')),
+    ] %}
+    {% for href, icon, label, active in tabs %}
+      {% if href == '#notifications' %}
+      <button type="button" @click="$dispatch('open-notifications')"
+              class="relative flex flex-col items-center justify-center gap-0.5 py-2 text-ios-label3 active:bg-ios-fill2 dark:active:bg-slate-700/40 transition">
+        <iconify-icon icon="lucide:{{ icon }}" width="21" height="21"></iconify-icon>
+        <span class="text-[10px] font-medium">{{ label }}</span>
+        {% set unread = get_unread_notifications(request) or 0 %}
+        {% if unread %}
+        <span class="absolute top-1 right-[calc(50%-18px)] min-w-[16px] h-4 px-1
+                     rounded-full bg-ios-red text-white text-[9px] leading-4 text-center font-semibold">
+          {{ '99+' if unread > 99 else unread }}
+        </span>
+        {% endif %}
+      </button>
+      {% else %}
+      <a href="{{ href }}"
+         class="flex flex-col items-center justify-center gap-0.5 py-2 transition
+                active:bg-ios-fill2 dark:active:bg-slate-700/40
+                {% if active %}text-ios-tint{% else %}text-ios-label3{% endif %}">
+        <iconify-icon icon="lucide:{{ icon }}" width="21" height="21"></iconify-icon>
+        <span class="text-[10px] font-medium">{{ label }}</span>
+      </a>
+      {% endif %}
+    {% endfor %}
+  </div>
+</nav>
