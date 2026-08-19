@@ -65,3 +65,72 @@ def test_every_contact_has_avatar_field(monkeypatch):
 
 def test_empty_when_no_streaks():
     assert dy.parse_fire_streaks(b"no streaks here") == []
+
+
+# ── 窗口越界：没火花的会话偷走别人的天数 ──────────────────
+
+def test_没有火花的会话不会认领下一个会话的天数(monkeypatch):
+    """线上真实现象：「甜豆包」「Momo」根本没有火花，
+    却显示成 510 天和 353 天 —— 正好等于紧随其后的「周大明」「吴天成」。
+
+    根因是搜索窗口只有下界（conv_pos < p < conv_pos + 60000），
+    没有上界，于是前一个会话把后一个会话的 consecutive_chat 认领走了。
+    """
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    future = 9999999999
+    blob = (
+        # 没有任何火花标记的会话，紧跟着一个 510 天的
+        b"0:1:999:111" + sep
+        + b"0:1:999:222" + sep + _consecutive(510) + sep + _chat_data(future) + sep
+    )
+    by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob)}
+
+    assert "111" not in by_uid, \
+        f"没火花的会话被算出了 {by_uid.get('111', {}).get('days')} 天"
+    assert by_uid["222"]["days"] == 510
+
+
+def test_相邻会话的天数不会串(monkeypatch):
+    """两个都有火花时，各拿各的，不能都取到第一个。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    future = 9999999999
+    blob = (
+        b"0:1:999:111" + sep + _consecutive(100) + sep + _chat_data(future) + sep
+        + b"0:1:999:222" + sep + _consecutive(200) + sep + _chat_data(future) + sep
+        + b"0:1:999:333" + sep + _consecutive(300) + sep + _chat_data(future) + sep
+    )
+    by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob)}
+    assert by_uid["111"]["days"] == 100
+    assert by_uid["222"]["days"] == 200
+    assert by_uid["333"]["days"] == 300
+
+
+def test_同一会话id重复出现不影响取数(monkeypatch):
+    """conv_id 在数据块里会重复出现，不能因此把窗口截成 0 长度。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    future = 9999999999
+    blob = (
+        b"0:1:999:111" + sep + b"0:1:999:111" + sep
+        + _consecutive(77) + sep + _chat_data(future) + sep
+        + b"0:1:999:222" + sep + _consecutive(88) + sep + _chat_data(future) + sep
+    )
+    by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob)}
+    assert by_uid["111"]["days"] == 77
+    assert by_uid["222"]["days"] == 88
+
+
+def test_过期判定也不会串到下一个会话(monkeypatch):
+    """expire_time 的取值窗口有同样的问题：
+    前一个会话会读到后一个会话的过期时间，把 active 误判成 broken。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    blob = (
+        b"0:1:999:111" + sep + _consecutive(10) + sep + _chat_data(9999999999) + sep
+        + b"0:1:999:222" + sep + _consecutive(20) + sep + _chat_data(1000000000) + sep
+    )
+    by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob)}
+    assert by_uid["111"]["status"] == "active"   # 不该被 BBB 的过期时间影响
+    assert by_uid["222"]["status"] == "broken"

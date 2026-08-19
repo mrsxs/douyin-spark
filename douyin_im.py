@@ -1611,7 +1611,26 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
     result = []
     seen_uids: set = set()
 
-    for conv_pos, conv_id in conv_positions:
+    # 每个会话的数据块，到「下一个**不同** conv_id 出现的位置」为止。
+    #
+    # 原来只有下界（conv_pos < p < conv_pos + 60000），没有上界，于是
+    # 一个没有火花的会话会把后面那个会话的 consecutive_chat 认领过来 ——
+    # 线上表现是「甜豆包」「Momo」根本没火花，却显示成 510 天和 353 天，
+    # 正好等于紧随其后的「周大明」「吴天成」。
+    #
+    # 上界取「下一个不同的 conv_id」而不是「下一个位置」：同一个 conv_id
+    # 在自己的数据块里会重复出现好几次，按位置截会把窗口截成 0 长度，
+    # 那样连有火花的会话也读不到天数了。
+    conv_bounds: list[int] = []
+    for i, (pos, cid) in enumerate(conv_positions):
+        end = pos + 60000
+        for p2, c2 in conv_positions[i + 1:]:
+            if c2 != cid:
+                end = min(end, p2)
+                break
+        conv_bounds.append(end)
+
+    for (conv_pos, conv_id), conv_end in zip(conv_positions, conv_bounds):
         parts = conv_id.split(":")
         if len(parts) < 4:
             continue
@@ -1625,11 +1644,10 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
         if uid in seen_uids:
             continue
 
-        # 搜索窗口扩大到 60KB，覆盖更大跨度的数据块
-        # 取 conv_pos 之后窗口内的 consecutive_chat 标记 + expire_time
+        # 只认属于这个会话数据块的火花标记（见上面 conv_bounds 的说明）
         match = next(
             ((d, mk) for p, d, mk in streak_entries
-             if conv_pos < p < conv_pos + 60000 and mk == "consecutive_chat"),
+             if conv_pos < p < conv_end and mk == "consecutive_chat"),
             None,
         )
         # 状态分类：
@@ -1639,7 +1657,7 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             days, marker = match
             # consecutive_chat_data.expire_time 是火花过期 unix 秒；< 当前时间 → 已断
             exp_ts = next((e for p, e in chat_data_entries
-                           if conv_pos < p < conv_pos + 60000), None)
+                           if conv_pos < p < conv_end), None)
             if exp_ts and exp_ts < _now_ts:
                 status = "broken"
                 from datetime import datetime as _dt
@@ -1650,7 +1668,7 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
         else:
             # 没有 consecutive_chat，只剩 rekindled 记录 → 火花已断，需重燃
             _rekindled = next(((d, mk) for p, d, mk in streak_entries
-                               if conv_pos < p < conv_pos + 60000), None)
+                               if conv_pos < p < conv_end), None)
             if not _rekindled:
                 continue
             days, marker = _rekindled
