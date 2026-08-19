@@ -128,6 +128,39 @@ jobs:
           '
           echo "✓ 核心模块已编译"
 
+          # ③ 编译完还得能跑。
+          #    只测「编译成功」是不够的：Cython 默认把 PEP-484 注解当运行时类型声明，
+          #    FastAPI 的 `username: str = Form(...)` 会在模块 init 时抛
+          #    `TypeError: Expected str, got Form`，router 一个都 import 不进来。
+          #    这个镜像照样能通过 ①②，然后在客户机器上崩溃循环 —— 真发生过。
+          docker run --rm -e SKIP_LICENSE_CHECK=1 -e SECRET_KEY=ci-selfcheck \
+            -e DATA_DIR=/tmp/selfcheck "$IMG" python -c "
+from app import license as lic
+lic._LICENSE_OK = True
+from app.routers import auth, dashboard, api, admin, login_flow, ai
+import app.main as m
+app = m.app
+print('routes:', len(app.routes))
+"
+          echo "✓ 应用可正常加载（router 全部 import 成功）"
+
+          # ④ 真起一个容器，打一次 /healthz。
+          #    上面是 import 级别的检查，这里确认进程能活着对外服务。
+          CID=$(docker run -d -e SKIP_LICENSE_CHECK=1 -e SECRET_KEY=ci-selfcheck \
+                  -p 18765:8765 "$IMG")
+          for i in $(seq 1 30); do
+            if curl -sf -m 3 http://127.0.0.1:18765/healthz >/dev/null 2>&1; then
+              echo "✓ 容器启动正常，/healthz 可访问"
+              docker rm -f "$CID" >/dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::容器起来了但 /healthz 一直不通"
+          docker logs --tail 40 "$CID"
+          docker rm -f "$CID" >/dev/null
+          exit 1
+
       - name: Summary
         run: |
           echo "## ✅ 构建完成" >> $GITHUB_STEP_SUMMARY

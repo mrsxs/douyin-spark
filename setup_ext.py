@@ -62,6 +62,13 @@ setup(
         compiler_directives={
             "language_level": 3,
             "always_allow_keywords": True,   # FastAPI 依赖注入要这个
+            # 必须关掉：Cython 默认把 PEP-484 注解当成运行时类型声明，
+            # 于是 `username: str = Form(...)` 在模块 init 时就报
+            # `TypeError: Expected str, got Form` —— FastAPI 的 Form/Depends/Body
+            # 默认值全是对象，不是注解写的那个类型。整个 router 模块 import 不进来。
+            # 这个坑之前一直没暴露，是因为 cythonize 本来就编译失败、
+            # 所有代码都以纯 Python 在跑。
+            "annotation_typing": False,
             "emit_code_comments": False,
         },
         build_dir="build",
