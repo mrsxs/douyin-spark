@@ -134,14 +134,7 @@ jobs:
           #    `TypeError: Expected str, got Form`，router 一个都 import 不进来。
           #    这个镜像照样能通过 ①②，然后在客户机器上崩溃循环 —— 真发生过。
           docker run --rm -e SKIP_LICENSE_CHECK=1 -e SECRET_KEY=ci-selfcheck \
-            -e DATA_DIR=/tmp/selfcheck "$IMG" python -c "
-from app import license as lic
-lic._LICENSE_OK = True
-from app.routers import auth, dashboard, api, admin, login_flow, ai
-import app.main as m
-app = m.app
-print('routes:', len(app.routes))
-"
+            -e DATA_DIR=/tmp/selfcheck "$IMG" python -c 'from app import license as lic; lic._LICENSE_OK = True; from app.routers import auth, dashboard, api, admin, login_flow, ai; import app.main as m; print("routes:", len(m.app.routes))'
           echo "✓ 应用可正常加载（router 全部 import 成功）"
 
           # ④ 真起一个容器，打一次 /healthz。
