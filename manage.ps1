@@ -305,10 +305,15 @@ function Do-Renew {
     $envText = Get-Content ".env" -Raw
     if ($envText -match "(?m)^LICENSE_KEY=") {
         $envText = $envText -replace "(?m)^LICENSE_KEY=.*$", "LICENSE_KEY=$newLic"
-        $envText | Out-File -FilePath ".env" -Encoding UTF8 -NoNewline
     } else {
-        Add-Content ".env" "`nLICENSE_KEY=$newLic"
+        $envText = $envText.TrimEnd() + "`nLICENSE_KEY=$newLic`n"
     }
+    # 和安装时一样必须用 WriteAllText：PowerShell 5.1 的 `Out-File -Encoding UTF8`
+    # 会写 BOM，那三个字节会粘在 .env 第一行开头，docker compose 读出来的
+    # 首个变量名就带上了不可见前缀 —— 表现是「续期后 License 反而失效」，
+    # 而且肉眼完全看不出来。Add-Content 的默认编码同理不能用。
+    [System.IO.File]::WriteAllText("$INSTALL_DIR\.env", $envText,
+                                   [System.Text.UTF8Encoding]::new($false))
     Info ".env 已更新"
 
     Write-Host "重启容器..."
@@ -359,6 +364,50 @@ function Do-Uninstall {
     }
 }
 
+# ─── [6] 查看机器码 ────────────────────────────
+function Do-MachineId {
+    Title "[6] 查看机器码"
+    Set-Location $INSTALL_DIR
+    if (-not (Test-Path "docker-compose.yml")) { Die "还没安装，请先选 [1]" }
+
+    # 机器码存在数据卷的 .install_id 里，所以取码的容器**必须挂着同一个数据卷**。
+    # 用 docker exec（容器在跑）或 docker compose run（容器没跑，compose 会按
+    # 配置挂载数据卷）。绝不能用 docker run --rm 起裸容器 —— 那会现场生成一个
+    # 随即丢弃的 id，拿到的码是错的，签发后客户照样启动不了。
+    $raw = $null
+    if (Test-Container) {
+        $raw = docker exec $CONTAINER python -c "from app.license import _machine_id; print(_machine_id())" 2>$null
+    } else {
+        Warn "容器未运行，用一次性容器读取（仍挂载同一数据卷）"
+        $raw = docker compose run --rm --entrypoint python app -c "from app.license import _machine_id; print(_machine_id())" 2>$null
+    }
+
+    # 输出里可能混着容器启动的其它信息，只挑出 16 位十六进制那一行
+    $mid = ($raw | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f]{16}$' } | Select-Object -Last 1)
+
+    if (-not $mid) {
+        Err "没取到机器码"
+        Write-Host "  原始输出：" -ForegroundColor Gray
+        $raw | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        Write-Host "`n  也可以直接看文件：" -ForegroundColor Cyan
+        Write-Host "    type $INSTALL_DIR\data\.install_id" -ForegroundColor Cyan
+        return
+    }
+
+    Write-Host ""
+    Hr
+    Write-Host "  机器码：$mid" -ForegroundColor Yellow
+    Hr
+    Write-Host "  把这一串发给卖家，即可签发绑定本机的 License。" -ForegroundColor White
+    Write-Host "  它存在数据目录里，容器重建/镜像升级都不会变；" -ForegroundColor Gray
+    Write-Host "  但换服务器或删掉 data 目录后会变，需要重新签发。" -ForegroundColor Gray
+    Write-Host ""
+    try {
+        Set-Clipboard -Value $mid -ErrorAction Stop
+        Info "已复制到剪贴板"
+    } catch { }
+}
+
 # ─── 主菜单 ────────────────────────────────────
 Check-Deps
 New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
@@ -380,10 +429,11 @@ while ($true) {
     Write-Host "  [3] 续期 License"
     Write-Host "  [4] 查看状态 & 日志"
     Write-Host "  [5] 卸载"
+    Write-Host "  [6] 查看机器码（签发绑定 License 用）"
     Write-Host ""
     Write-Host "  [0] 退出"
     Write-Host ""
-    $choice = Read-Host "选择 [0-5]"
+    $choice = Read-Host "选择 [0-6]"
 
     switch ($choice) {
         "1" { Do-Install }
@@ -391,6 +441,7 @@ while ($true) {
         "3" { Do-Renew }
         "4" { Do-Status }
         "5" { Do-Uninstall }
+        "6" { Do-MachineId }
         "0" { Write-Host "再见 👋"; exit 0 }
         default { Warn "无效选择" }
     }
