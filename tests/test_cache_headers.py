@@ -11,6 +11,8 @@ import pytest
 
 from app.cache_mw import CACHEABLE_PREFIXES, _rewrite
 
+ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+
 
 def header(resp, name):
     return resp.headers.get(name, "")
@@ -125,6 +127,88 @@ def test_rewrite_is_idempotent():
     once = _rewrite([])
     twice = _rewrite(once)
     assert sorted(once) == sorted(twice)
+
+
+# ── SSE：no-transform 必须活下来 ──────────────────────────────────────
+
+def test_rewrite_preserves_no_transform():
+    """SSE 端点发 `no-cache, no-transform`。no-transform 是告诉中间代理
+    别压缩别缓冲响应体，被吃掉的话 CDN 会把 text/event-stream 整条缓冲，
+    浏览器一个事件都收不到 —— 聊天页永远「未连接」。"""
+    out = _rewrite([(b"cache-control", b"no-cache, no-transform")])
+    cc = next(v for k, v in out if k == b"cache-control")
+    assert b"no-transform" in cc
+    assert b"no-store" in cc
+
+
+def test_rewrite_preserve_is_idempotent():
+    once = _rewrite([(b"cache-control", b"no-cache, no-transform")])
+    twice = _rewrite(once)
+    cc = next(v for k, v in twice if k == b"cache-control")
+    assert cc.count(b"no-transform") == 1, "反复穿过中间件不能把指令叠成一串"
+
+
+def test_rewrite_still_drops_max_age_even_with_preserve():
+    out = _rewrite([(b"cache-control", b"public, max-age=2592000, no-transform")])
+    cc = next(v for k, v in out if k == b"cache-control")
+    assert b"no-transform" in cc
+    assert b"2592000" not in cc
+    assert b"public" not in cc
+
+
+def test_sse_shaped_response_keeps_no_transform():
+    """把中间件套在一个「长得像 SSE」的假应用上跑一遍。
+
+    不用 TestClient 打真 SSE：那条流设计上永不结束，
+    TestClient 会一直等它读完 → 测试挂死。
+    """
+    headers = _run_middleware([(b"content-type", b"text/event-stream"),
+                               (b"cache-control", b"no-cache, no-transform"),
+                               (b"x-accel-buffering", b"no")])
+    cc = headers[b"cache-control"]
+    assert b"no-transform" in cc, "no-transform 被中间件吃了 → CDN 会缓冲 SSE"
+    assert b"no-store" in cc
+    assert headers[b"x-accel-buffering"] == b"no", "nginx 反缓冲头不能被丢掉"
+    assert headers[b"content-type"] == b"text/event-stream"
+
+
+def test_static_path_is_untouched_by_middleware():
+    headers = _run_middleware([(b"cache-control", b"public, max-age=3600")],
+                              path="/static/app.js")
+    assert headers[b"cache-control"] == b"public, max-age=3600"
+
+
+def _run_middleware(resp_headers, path="/api/messages/1/stream"):
+    """跑一次 NoStoreMiddleware，返回最终响应头 dict。"""
+    import asyncio
+
+    from app.cache_mw import NoStoreMiddleware
+
+    async def fake_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": list(resp_headers)})
+        await send({"type": "http.response.body", "body": b": connected\n\n"})
+
+    captured = {}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            captured.update({k.lower(): v for k, v in message["headers"]})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    asyncio.run(NoStoreMiddleware(fake_app)(
+        {"type": "http", "path": path, "method": "GET", "headers": []},
+        receive, send))
+    return captured
+
+
+def test_sse_endpoint_still_declares_no_transform():
+    """守住源头：端点自己得继续发 no-transform，中间件才有东西可保。"""
+    src = (ROOT / "app" / "routers" / "api.py").read_text(encoding="utf-8")
+    assert "no-transform" in src, "SSE 端点的 Cache-Control 丢了 no-transform"
+    assert "X-Accel-Buffering" in src
 
 
 # ── 中间件真的挂上了 ──────────────────────────────────────────────────

@@ -25,6 +25,8 @@ CACHEABLE_PREFIXES = ("/static/", "/favicon.ico")
 
 _NO_STORE = b"no-store, no-cache, must-revalidate, private, max-age=0"
 _DROP = (b"cache-control", b"pragma", b"expires")
+# 和缓存时长无关、必须原样透传的指令（SSE 靠 no-transform 活着）
+_PRESERVE = (b"no-transform",)
 
 
 class NoStoreMiddleware:
@@ -50,11 +52,24 @@ def _rewrite(headers) -> list[tuple[bytes, bytes]]:
 
     Vary 要**追加**不能覆盖：上游可能已经写了 Accept-Encoding，
     直接盖掉会让压缩和非压缩版本混用。
+
+    Cache-Control 也不能无脑整条替换 —— SSE 端点发的是
+    `no-cache, no-transform`，其中 no-transform 是告诉中间代理
+    「别压缩、别缓冲这个响应体」。吃掉它，CDN 就会把 text/event-stream
+    整条缓冲起来，浏览器一个事件都收不到，聊天页永远显示「未连接」。
+    所以这类与缓存时长无关的指令必须原样留下。
     """
     out: list[tuple[bytes, bytes]] = []
     vary_parts: list[bytes] = []
+    keep: list[bytes] = []
     for k, v in headers:
         lk = k.lower()
+        if lk == b"cache-control":
+            for directive in v.split(b","):
+                d = directive.strip()
+                if d.lower() in _PRESERVE and d.lower() not in keep:
+                    keep.append(d.lower())
+            continue
         if lk in _DROP:
             continue
         if lk == b"vary":
@@ -65,7 +80,11 @@ def _rewrite(headers) -> list[tuple[bytes, bytes]]:
     if not any(p.lower() == b"cookie" for p in vary_parts):
         vary_parts.append(b"Cookie")
 
-    out.append((b"cache-control", _NO_STORE))
+    cache_control = _NO_STORE
+    if keep:
+        cache_control += b", " + b", ".join(keep)
+
+    out.append((b"cache-control", cache_control))
     out.append((b"pragma", b"no-cache"))
     out.append((b"expires", b"0"))
     out.append((b"vary", b", ".join(vary_parts)))

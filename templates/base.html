@@ -293,6 +293,15 @@ window.api = async (url, method='GET', body=null) => {
   const headers = {'Content-Type':'application/json'};
   if (method !== 'GET') headers['X-CSRF-Token'] = window._getCsrf();
   const opts = { method, headers };
+  // GET 一律打成不可缓存。服务可能被客户挂在任意 CDN 后面，而 CDN 未必遵循
+  // 源站的 no-store —— 真出过事：轮询登录状态的响应被边缘缓存了 4 分钟，
+  // 后端早已进入「等短信验证码」，前端每次读到的还是旧的 waiting_scan，
+  // 于是验证码收到了、输入框永远不弹。URL 每次都不同，谁都没法拿旧的糊弄。
+  if (method === 'GET') {
+    opts.cache = 'no-store';   // 浏览器自己那层
+    url += (url.includes('?') ? '&' : '?') + '_ts=' + Date.now()
+           + Math.random().toString(36).slice(2, 6);
+  }
   if (body !== null) opts.body = JSON.stringify(body);
   let r;
   try {

@@ -709,8 +709,11 @@ function chat() {
 
     connect() {
       if (this._es || this.refresh === 'off') return;
+      // SSE 同样要防中间层缓存/复用：URL 带一次性参数，
+      // 断线重连时也会重新生成，不会粘住某个边缘节点的旧连接
       const es = new EventSource(
-        `/api/messages/${ACC_ID}/stream?interval=${encodeURIComponent(this.refresh)}`);
+        `/api/messages/${ACC_ID}/stream?interval=${encodeURIComponent(this.refresh)}`
+        + `&_ts=${Date.now()}${Math.random().toString(36).slice(2, 6)}`);
       this._es = es;
       es.onopen = () => { this.live = true; };
       es.onerror = () => {
