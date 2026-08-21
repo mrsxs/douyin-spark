@@ -223,7 +223,8 @@
                            : 'bg-white dark:bg-slate-700 text-ios-label dark:text-slate-100 rounded-bl-md border border-ios-sep dark:border-slate-600'">
 
                       <!-- 内嵌媒体：分享的视频/图片直接看到画面，不用只读一行标题 -->
-                      <template x-if="m.media && m.media.cover">
+                      {# 表情包排除在外 —— 它下面有自己的渲染（原尺寸贴出来，不裁剪不点开） #}
+                      <template x-if="m.media && m.media.cover && m.media.kind !== 'emoji'">
                         <button @click="openMedia(m)" type="button"
                           class="block relative mb-1.5 rounded-xl overflow-hidden bg-black/10 w-44 max-w-full">
                           {#
@@ -254,7 +255,51 @@
                         </button>
                       </template>
 
-                      <div><span x-show="m.kind !== 'text' && !(m.media && m.media.cover)" class="opacity-70 text-xs mr-1" x-text="kindIcon(m.kind)"></span><span class="whitespace-pre-wrap" x-text="m.text"></span></div>
+                      {#
+                        表情包：贴图本身就是内容，缩成小图直接贴出来。
+                        不当封面处理（不裁剪、不点开大图），它就是一张表情。
+                      #}
+                      <template x-if="m.media && m.media.kind === 'emoji' && m.media.cover">
+                        <img :src="m.media.cover" alt="表情" loading="lazy"
+                             referrerpolicy="no-referrer"
+                             class="block max-w-[132px] max-h-[132px] w-auto h-auto rounded-lg"
+                             @error="onCoverError($event, m)">
+                      </template>
+
+                      {# 语音：能播、能看时长、能看波形，还能读转写文字 #}
+                      <template x-if="m.media && m.media.kind === 'audio' && m.media.src">
+                        <div>
+                          <button @click="toggleAudio(m)" type="button"
+                            class="flex items-center gap-2 min-w-[132px] py-0.5"
+                            :title="audioPlayingId === m.server_msg_id ? '暂停' : '播放'">
+                            <span class="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+                                  :class="m.is_me ? 'bg-white/25' : 'bg-ios-tintBg text-ios-tint'">
+                              <iconify-icon
+                                :icon="audioPlayingId === m.server_msg_id ? 'lucide:pause' : 'lucide:play'"
+                                width="14" height="14"></iconify-icon>
+                            </span>
+                            {# 波形：抖音给的 0~1 数组，没有就退化成一条静态横线 #}
+                            <span class="flex items-end gap-[2px] h-5 flex-1">
+                              <template x-for="(v, wi) in (m.media.wave || [])" :key="wi">
+                                <span class="w-[2px] rounded-full"
+                                      :class="m.is_me ? 'bg-white/70' : 'bg-ios-tint/70'"
+                                      :style="`height:${Math.max(3, v * 20)}px`"></span>
+                              </template>
+                              <span x-show="!(m.media.wave || []).length"
+                                    class="h-[3px] w-full rounded-full"
+                                    :class="m.is_me ? 'bg-white/50' : 'bg-ios-tint/50'"></span>
+                            </span>
+                            <span class="text-[11px] tabular-nums shrink-0"
+                                  :class="m.is_me ? 'text-white/70' : 'text-ios-label3'"
+                                  x-text="audioLen(m)"></span>
+                          </button>
+                          <p x-show="m.media.asr" class="mt-1 text-xs opacity-80 whitespace-pre-wrap"
+                             x-text="m.media.asr"></p>
+                        </div>
+                      </template>
+
+                      {# 语音和表情自带内容，不用再显示「[语音] 4.9″」这类占位文字 #}
+                      <div x-show="!(m.media && (m.media.kind === 'audio' || m.media.kind === 'emoji'))"><span x-show="m.kind !== 'text' && !(m.media && m.media.cover)" class="opacity-70 text-xs mr-1" x-text="kindIcon(m.kind)"></span><span class="whitespace-pre-wrap" x-text="m.text"></span></div>
                       <div class="text-[10px] mt-0.5 text-right leading-none"
                            :class="m.is_me ? 'text-white/60' : 'text-ios-label3'"
                            x-text="timeLabel(m.created_at)"></div>
@@ -650,11 +695,10 @@ function chat() {
       this.loadAi();
       // 页面藏起来时断开 SSE —— 服务端没人看就停轮询，不白给抖音打请求
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden) this.disconnect();
+        if (document.hidden) { this.disconnect(); this.stopAudio(); }
         else if (!this._es) this.connect();
       });
-      window.addEventListener('beforeunload', () => this.disconnect());
-    },
+      window.addEventListener('beforeunload', () => this.disconnect());    },
 
     setRefresh() {
       localStorage.setItem(REFRESH_KEY, this.refresh);
@@ -735,6 +779,7 @@ function chat() {
     },
 
     async open(c) {
+      this.stopAudio();          // 换人了还在放上一个人的语音，很怪
       this.peerUid = c.uid;
       delete this.unread[c.uid];
       this.messages = [];
@@ -814,6 +859,47 @@ function chat() {
 
     kindIcon(k) {
       return { image: '🖼', audio: '🎤', share: '🔗', emoji: '😀' }[k] || '';
+    },
+
+    /*
+      语音播放。全局只留一个 <audio>：每条消息各建一个的话，
+      连点几条就会同时出声，谁也听不清。
+    */
+    audioPlayingId: null,
+    _audio: null,
+
+    audioLen(m) {
+      const ms = m.media && m.media.duration_ms;
+      if (!ms) return '';
+      const s = ms / 1000;
+      return (s < 10 ? s.toFixed(1) : Math.round(s)) + '″';
+    },
+
+    stopAudio() {
+      if (this._audio) { this._audio.pause(); this._audio = null; }
+      this.audioPlayingId = null;
+    },
+
+    toggleAudio(m) {      const id = m.server_msg_id;
+      if (this.audioPlayingId === id) {          // 再点一次 = 暂停
+        this._audio && this._audio.pause();
+        this.audioPlayingId = null;
+        return;
+      }
+      if (this._audio) this._audio.pause();      // 换一条 = 停掉上一条
+      const a = new Audio(m.media.src);
+      a.onended = () => { if (this.audioPlayingId === id) this.audioPlayingId = null; };
+      a.onerror = () => {
+        this.audioPlayingId = null;
+        // 语音地址带 x-expires，过期就 403 —— 说清楚，别让人以为播放器坏了
+        toast('语音已过期，抖音不再提供该文件', 'err');
+      };
+      this._audio = a;
+      this.audioPlayingId = id;
+      a.play().catch(() => {
+        this.audioPlayingId = null;
+        toast('播放失败，可能是浏览器拦截了自动播放', 'err');
+      });
     },
 
     onCoverError(ev, m) {

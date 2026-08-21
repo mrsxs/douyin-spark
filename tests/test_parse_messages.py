@@ -414,3 +414,73 @@ def test_hostile_vid_is_rejected(bad_vid):
     out = dy.parse_messages(_resp(_msg(mtype=8, content={
         "itemId": bad_vid, "cover_url": {"url_list": [_COVER]}})), my_uid=MY_UID)
     assert (out[0]["media"] or {}).get("vid", "") == ""
+
+
+# ── 语音与表情包：要能播、能看 ────────────────────────────
+
+def _url_node(u="https://p1-sign.douyinpic.com/obj/xx"):
+    return {"uri": "douyin-user-image-file/xx", "url_list": [u]}
+
+
+def test_表情包解析出图片地址():
+    """只显示「[表情]」的话，一连串表情长得一模一样，
+    完全看不出对方在表达什么。"""
+    md = dy._media("emoji", {"url": _url_node(), "width": 463, "height": 322})
+    assert md["kind"] == "emoji"
+    assert md["cover"].startswith("https://")
+    assert md["width"] == 463 and md["height"] == 322
+
+
+def test_语音解析出音频地址与时长():
+    md = dy._media("audio", {
+        "resource_url": _url_node("https://sf26-sign.douyinstatic.com/a.mpeg"),
+        "duration": 4899,
+        "voice_wave": [0, 0.3081, 0.5918],
+    })
+    assert md["kind"] == "audio"
+    assert md["src"].endswith(".mpeg")
+    assert md["duration_ms"] == 4899
+    assert md["wave"] == [0.0, 0.31, 0.59]
+
+
+def test_语音波形被截断():
+    """抖音能给几百个点，整段塞进 DB 会把 media 字段撑爆（上限 2000 字节）。"""
+    md = dy._media("audio", {
+        "resource_url": _url_node("https://x.test/a.mpeg"),
+        "voice_wave": [0.5] * 500,
+    })
+    assert len(md["wave"]) <= 40
+
+
+def test_语音带上转写文字():
+    md = dy._media("audio", {
+        "resource_url": _url_node("https://x.test/a.mpeg"),
+        "ai_audio_text": "明天一起吃饭吧",
+    })
+    assert md["asr"] == "明天一起吃饭吧"
+
+
+def test_没有转写时不带asr字段():
+    md = dy._media("audio", {
+        "resource_url": _url_node("https://x.test/a.mpeg"), "ai_audio_text": "  "})
+    assert "asr" not in md
+
+
+def test_拿不到地址就不画卡片():
+    """返回 None 前端才知道该退回纯文字，而不是渲染一个空播放器。"""
+    assert dy._media("audio", {"duration": 3000}) is None
+    assert dy._media("emoji", {"width": 100}) is None
+
+
+def test_非http地址一律丢弃():
+    """这些地址直接进 <img src> / new Audio()，javascript: 混进来就是 XSS。"""
+    bad = {"url_list": ["javascript:alert(1)"]}
+    assert dy._media("emoji", {"url": bad}) is None
+    assert dy._media("audio", {"resource_url": bad}) is None
+
+
+def test_异常时长被忽略():
+    for dur in (0, -5, 99_999_999):
+        md = dy._media("audio", {"resource_url": _url_node("https://x.test/a.mpeg"),
+                                 "duration": dur})
+        assert "duration_ms" not in md

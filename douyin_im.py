@@ -1801,7 +1801,8 @@ def _cover_pair(node) -> tuple[str, str]:
 
 
 def _media(kind: str, content: dict) -> dict | None:
-    """抽出可内嵌的媒体：分享视频给封面 + 视频 id，图片给原图。
+    """抽出可内嵌的媒体：分享视频给封面 + 视频 id，图片给原图，
+    表情给贴图，语音给音频地址 + 时长 + 波形。
 
     拿不到任何可展示的东西就返回 None —— 前端据此决定画不画卡片。
     """
@@ -1814,6 +1815,42 @@ def _media(kind: str, content: dict) -> dict | None:
             v = content.get(src)
             if isinstance(v, int) and 0 < v < 100000:
                 out[dst] = v
+        return out
+
+    if kind == "emoji":
+        # 自定义表情/贴图。只显示「[表情]」的话，对话里一连串表情全都长一样，
+        # 完全看不出对方在表达什么。
+        cover, alt = _cover_pair(content.get("url"))
+        if not cover:
+            return None
+        out = {"kind": "emoji", "cover": cover, "cover_alt": alt, "vid": ""}
+        for key in ("width", "height"):
+            v = content.get(key)
+            if isinstance(v, int) and 0 < v < 100000:
+                out[key] = v
+        return out
+
+    if kind == "audio":
+        # 语音。不给地址就只剩一个时长数字，没法确认对方到底说了什么。
+        src, _alt = _cover_pair(content.get("resource_url"))
+        if not src:
+            return None
+        out = {"kind": "audio", "src": src, "cover": "", "vid": ""}
+        dur = content.get("duration")
+        if isinstance(dur, int) and 0 < dur < 3600_000:      # 抖音给的是毫秒
+            out["duration_ms"] = dur
+        # 波形用来画音量条。抖音给的是 0~1 的浮点数组，取前若干个够画了，
+        # 整段塞进 DB 会把 media 字段撑爆（_MEDIA_MAX 只有 2000 字节）。
+        wave = content.get("voice_wave")
+        if isinstance(wave, list) and wave:
+            bars = [round(float(x), 2) for x in wave[:40]
+                    if isinstance(x, (int, float)) and 0 <= x <= 1]
+            if bars:
+                out["wave"] = bars
+        # 抖音自带的语音转文字，有就带上 —— 不方便外放时能直接读
+        text = content.get("ai_audio_text")
+        if isinstance(text, str) and text.strip():
+            out["asr"] = text.strip()[:200]
         return out
 
     if kind != "share":
