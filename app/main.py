@@ -85,6 +85,12 @@ def create_app() -> FastAPI:
     from .csrf_mw import CSRFMiddleware
     app.add_middleware(CSRFMiddleware, secure_cookie=settings.cookie_secure)
 
+    # 缓存头（最后 add = 最外层，连 CSRF 的 403 响应也一并盖到）。
+    # 线上 CDN 见到没有 Cache-Control 的 200 HTML 会自作主张缓存 30 天，
+    # 且不按 Cookie 区分 —— 结果是把 A 的已登录页面发给 B。
+    from .cache_mw import NoStoreMiddleware
+    app.add_middleware(NoStoreMiddleware)
+
     # 模板
     tmpl = Jinja2Templates(directory="templates")
     tmpl.env.globals["site_name"] = settings.site_name
