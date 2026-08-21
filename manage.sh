@@ -8,7 +8,7 @@
 #
 # 功能：
 #   [1] 安装/启动服务（首次部署 + 后续升级）
-#   [2] 重置管理员密码
+#   [2] 重置用户密码
 #   [3] 续期 License
 #   [4] 查看服务状态 & 日志
 #   [0] 退出
@@ -184,15 +184,26 @@ do_install() {
 }
 
 # ────────────────────────────────────────────
-# [2] 重置管理员密码
+# [2] 重置用户密码
 # ────────────────────────────────────────────
 do_reset_password() {
-    title "[2] 重置管理员密码"
+    title "[2] 重置用户密码"
     cd "$INSTALL_DIR"
     container_running || die "容器 ${CONTAINER} 未运行，请先选 [1] 安装/启动"
 
+    echo "  当前用户一览："
+    docker exec "$CONTAINER" python -m app.cli list-users 2>/dev/null \
+        | sed 's/^/    /' || warn "（老镜像不支持 list-users，跳过）"
+    echo
+
     read -r -p "用户名（默认 admin）: " USERNAME
     USERNAME="${USERNAME:-admin}"
+
+    # 旧版本在这里无条件 is_admin=True —— 给普通用户改个密码就把他变成了管理员，
+    # 提示语还只说「已重置密码」。默认必须保持原权限不变，提权要显式确认。
+    MAKE_ADMIN=0
+    read -r -p "同时赋予管理员权限？（能看全部用户数据）[y/N]: " PROMOTE
+    [[ "$PROMOTE" =~ ^[Yy]$ ]] && MAKE_ADMIN=1
 
     while true; do
         read -r -s -p "新密码（隐藏）: " NEW
@@ -214,24 +225,33 @@ from app.models import User
 init_db()
 username = os.environ.get('UNAME', 'admin')
 pwd = os.environ['NEW']
+make_admin = os.environ.get('MAKE_ADMIN') == '1'
 h = bcrypt.hashpw(pwd.encode()[:72], bcrypt.gensalt(12)).decode()
 with SessionLocal() as db:
     u = db.query(User).filter(User.username == username).first()
     if not u:
-        u = User(username=username, password_hash=h, is_admin=True, is_active=True,
-                 expires_at=datetime(2099, 12, 31), max_accounts=100)
+        u = User(username=username, password_hash=h,
+                 is_admin=make_admin, is_active=True,
+                 expires_at=datetime(2099, 12, 31) if make_admin else None,
+                 max_accounts=100 if make_admin else 0)
         db.add(u)
-        msg = f'✓ 已创建管理员 {username}'
+        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户（需兑换授权码激活）"} {username}'
     else:
-        u.password_hash = h; u.is_active = True; u.is_admin = True
-        msg = f'✓ 已重置 {username} 密码'
+        u.password_hash = h
+        u.is_active = True
+        if make_admin and not u.is_admin:
+            u.is_admin = True
+            print(f'⚠️ 已把 {username} 提升为管理员')
+        # 旧 cookie 立即失效，否则改了密码也踢不掉已登录的会话
+        u.session_version = (u.session_version or 0) + 1
+        msg = f'✓ 已重置 {username} 密码（权限：{"管理员" if u.is_admin else "普通用户"}）'
     db.commit()
     print(msg)
-    print('hash 前缀:', h[:30] + '...')
 PYEOF
     # 关键：cp 到 /app（容器 WORKDIR）让 python 能 import app 包
     docker cp /tmp/_reset_admin.py "${CONTAINER}:/app/_reset_admin.py" >/dev/null
-    docker exec -e NEW="$NEW" -e UNAME="$USERNAME" --workdir /app "$CONTAINER" python /app/_reset_admin.py
+    docker exec -e NEW="$NEW" -e UNAME="$USERNAME" -e MAKE_ADMIN="$MAKE_ADMIN" \
+        --workdir /app "$CONTAINER" python /app/_reset_admin.py
     docker exec "$CONTAINER" rm -f /app/_reset_admin.py >/dev/null
     rm -f /tmp/_reset_admin.py
 
@@ -336,7 +356,7 @@ while true; do
     fi
     echo
     echo "  [1] 安装 / 启动 / 升级服务"
-    echo "  [2] 重置管理员密码"
+    echo "  [2] 重置用户密码"
     echo "  [3] 续期 License"
     echo "  [4] 查看状态 & 日志"
     echo

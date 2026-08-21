@@ -9,7 +9,7 @@
 #
 # 功能：
 #   [1] 安装/启动/升级
-#   [2] 重置管理员密码
+#   [2] 重置用户密码
 #   [3] 续期 License
 #   [4] 查看状态 & 日志
 #   [5] 卸载
@@ -221,14 +221,26 @@ function Do-Install {
     }
 }
 
-# ─── [2] 重置管理员密码 ────────────────────────
+# ─── [2] 重置用户密码 ────────────────────────
 function Do-ResetPassword {
-    Title "[2] 重置管理员密码"
+    Title "[2] 重置用户密码"
     Set-Location $INSTALL_DIR
     if (-not (Test-Container)) { Die "容器 $CONTAINER 未运行，请先选 [1]" }
 
+    Write-Host "  当前用户一览："
+    docker exec $CONTAINER python -m app.cli list-users 2>$null `
+        | ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -ne 0) { Warn "（老镜像不支持 list-users，跳过）" }
+    Write-Host ""
+
     $username = Read-Host "用户名（默认 admin）"
     if (-not $username) { $username = "admin" }
+
+    # 旧版本在这里无条件 is_admin=True —— 给普通用户改个密码就把他变成了管理员，
+    # 提示语还只说「已重置密码」。默认必须保持原权限不变，提权要显式确认。
+    $makeAdmin = "0"
+    $promote = Read-Host "同时赋予管理员权限？（能看全部用户数据）[y/N]"
+    if ($promote -match "^[Yy]$") { $makeAdmin = "1" }
 
     $newPwd = $null
     while ($true) {
@@ -249,26 +261,37 @@ from app.models import User
 init_db()
 username = os.environ.get('UNAME', 'admin')
 pwd = os.environ['NEW']
+make_admin = os.environ.get('MAKE_ADMIN') == '1'
 h = bcrypt.hashpw(pwd.encode()[:72], bcrypt.gensalt(12)).decode()
 with SessionLocal() as db:
     u = db.query(User).filter(User.username == username).first()
     if not u:
-        u = User(username=username, password_hash=h, is_admin=True, is_active=True,
-                 expires_at=datetime(2099, 12, 31), max_accounts=100)
+        u = User(username=username, password_hash=h,
+                 is_admin=make_admin, is_active=True,
+                 expires_at=datetime(2099, 12, 31) if make_admin else None,
+                 max_accounts=100 if make_admin else 0)
         db.add(u)
-        msg = f'✓ 已创建管理员 {username}'
+        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户（需兑换授权码激活）"} {username}'
     else:
-        u.password_hash = h; u.is_active = True; u.is_admin = True
-        msg = f'✓ 已重置 {username} 密码'
+        u.password_hash = h
+        u.is_active = True
+        if make_admin and not u.is_admin:
+            u.is_admin = True
+            print(f'⚠️ 已把 {username} 提升为管理员')
+        # 旧 cookie 立即失效，否则改了密码也踢不掉已登录的会话
+        u.session_version = (u.session_version or 0) + 1
+        msg = f'✓ 已重置 {username} 密码（权限：{"管理员" if u.is_admin else "普通用户"}）'
     db.commit()
     print(msg)
-    print('hash 前缀:', h[:30] + '...')
 '@
+    # PowerShell 5.1 的 Out-File -Encoding UTF8 会写 BOM，容器里 python 读到
+    # 首行是 '﻿import os' → SyntaxError。和 .env 那个坑同源，必须 WriteAllText。
     $tmp = "$env:TEMP\_reset_admin.py"
-    $py | Out-File -FilePath $tmp -Encoding UTF8
+    [System.IO.File]::WriteAllText($tmp, $py, [System.Text.UTF8Encoding]::new($false))
 
     docker cp $tmp "${CONTAINER}:/app/_reset_admin.py" | Out-Null
-    docker exec -e NEW=$newPwd -e UNAME=$username --workdir /app $CONTAINER python /app/_reset_admin.py
+    docker exec -e NEW=$newPwd -e UNAME=$username -e MAKE_ADMIN=$makeAdmin `
+        --workdir /app $CONTAINER python /app/_reset_admin.py
     docker exec $CONTAINER rm -f /app/_reset_admin.py | Out-Null
     Remove-Item $tmp -ErrorAction SilentlyContinue
 
@@ -425,7 +448,7 @@ while ($true) {
     }
     Write-Host ""
     Write-Host "  [1] 安装 / 启动 / 升级服务"
-    Write-Host "  [2] 重置管理员密码"
+    Write-Host "  [2] 重置用户密码"
     Write-Host "  [3] 续期 License"
     Write-Host "  [4] 查看状态 & 日志"
     Write-Host "  [5] 卸载"

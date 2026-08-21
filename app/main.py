@@ -25,6 +25,15 @@ def ensure_admin():
     with SessionLocal() as db:
         user = db.query(User).filter(User.username == settings.admin_username).first()
         if user:
+            # 把 .env 里的名字改成某个已注册普通用户的名字，会在这里静默把他提权、
+            # 并且每次重启都覆盖他的密码。这是「别的用户登录也是管理员」最隐蔽的一条路，
+            # 所以必须在日志里喊出来，不能只是 commit 完事。
+            if not user.is_admin:
+                print(f"[bootstrap] ⚠️ 警告：ADMIN_USERNAME={settings.admin_username} "
+                      f"命中了已存在的普通用户（id={user.id}），正把他提升为管理员并覆盖密码。"
+                      f"如果这不是你要的，改 .env 里的 ADMIN_USERNAME 后重启，"
+                      f"再执行 `python -m app.cli set-admin --username "
+                      f"{settings.admin_username} --off` 撤销。")
             user.password_hash = settings.admin_password_hash
             user.is_admin = True
             user.is_active = True
@@ -42,7 +51,13 @@ def ensure_admin():
             )
             db.add(user)
         db.commit()
+        extra = db.query(User).filter(User.is_admin.is_(True),
+                                      User.username != settings.admin_username).all()
         print(f"[bootstrap] 管理员已就绪: {settings.admin_username}")
+        if extra:
+            print(f"[bootstrap] ⚠️ 另有 {len(extra)} 个管理员账号: "
+                  f"{', '.join(u.username for u in extra)} —— 若非本意，用 "
+                  f"`python -m app.cli set-admin --username X --off` 撤销")
 
 
 @asynccontextmanager
