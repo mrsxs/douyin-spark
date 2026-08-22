@@ -135,3 +135,77 @@ def test_sse_keeps_interval_before_buster():
     frag = m.group(1)
     assert frag.index("interval=") < frag.index("_ts="), frag
     assert "&_ts=" in frag, "_ts 必须用 & 拼，前面已经有 ?interval= 了"
+
+
+# ── CSRF 失败不能进无限刷新 ───────────────────────────────────────────
+
+LOOP_HARNESS = """
+global.window = global;
+let cookie = %s;
+Object.defineProperty(global, 'document', { value: { get cookie() { return cookie; } } });
+const store = {};
+global.sessionStorage = {
+  getItem: k => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+  removeItem: k => { delete store[k]; },
+};
+let reloads = 0;
+global.location = { reload: () => { reloads++; }, href: '' };
+global.setTimeout = (fn) => fn();
+const toasts = [];
+global.toast = (m) => toasts.push(m);
+global.fetch = async () => ({
+  ok: false, status: 403,
+  text: async () => '{"ok":false,"error":"CSRF token 无效或过期"}',
+  json: async () => ({}),
+});
+%s
+(async () => {
+  const r1 = await window.api('/api/x', 'POST', {});
+  const r2 = await window.api('/api/x', 'POST', {});
+  const r3 = await window.api('/api/x', 'POST', {});
+  console.log(JSON.stringify({reloads, errs: [r1.error, r2.error, r3.error], toasts}));
+})();
+"""
+
+
+def _run_loop(cookie_js):
+    return _run_node(LOOP_HARNESS % (cookie_js, _extract_api_fn()))
+
+
+@pytest.fixture(scope="module")
+def loop_no_cookie():
+    return _run_loop("''")
+
+
+def test_csrf_failure_reloads_at_most_once(loop_no_cookie):
+    """三次连续 403，只允许刷新一次。
+
+    旧代码是无条件 location.reload()：中间层缓存了没有 Set-Cookie 的页面时，
+    每次加载都拿不到 csrf → POST 403 → 再刷 → 无限循环，
+    用户除了关标签页没别的办法。线上真发生过。
+    """
+    assert loop_no_cookie["reloads"] == 1, \
+        f"刷了 {loop_no_cookie['reloads']} 次 —— 会变成无限刷新"
+
+
+def test_second_failure_explains_missing_cookie(loop_no_cookie):
+    assert "csrf cookie" in loop_no_cookie["errs"][1], loop_no_cookie["errs"][1]
+    assert "CDN" in loop_no_cookie["errs"][1], "要指出最可能的原因，不然没人查得下去"
+
+
+def test_third_failure_still_does_not_reload(loop_no_cookie):
+    assert loop_no_cookie["reloads"] == 1
+    assert loop_no_cookie["errs"][2], "第三次也要返回可读的错误，不能是 undefined"
+
+
+def test_first_failure_still_reloads_once(loop_no_cookie):
+    """别矫枉过正：令牌真过期时，刷一次是对的补救。"""
+    assert "过期" in loop_no_cookie["errs"][0]
+
+
+def test_message_differs_when_cookie_exists():
+    """有 cookie 却仍被拒 → 不该甩锅给 CDN。"""
+    res = _run_loop("'csrf=abc123'")
+    assert "csrf cookie" not in res["errs"][1], res["errs"][1]
+    assert "停留过久" in res["errs"][1], res["errs"][1]
