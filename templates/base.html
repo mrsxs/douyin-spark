@@ -285,20 +285,29 @@
 <script>
 // 全局 fetch helper
 // 读 cookie 里的 CSRF token（服务端通过 middleware 自动 set-cookie）
+// 自动 location.reload() 的总闸：同一个 key 每个标签页只放行一次。
+// 任何**非用户点击触发**的重载都必须走这里。无条件重载一旦碰上
+// 「重载后状态依然不变」的外部原因（CDN/代理发缓存副本、Cookie 被拦），
+// 就会变成无限刷屏，用户除了关标签页毫无办法 —— 线上出过两次。
+// 标记随标签页存亡；sessionStorage 在隐私模式下会抛，包一层。
+window._reloadOnce = (key) => {
+  try {
+    const k = '_reload_' + key;
+    if (sessionStorage.getItem(k)) return false;
+    sessionStorage.setItem(k, '1');
+    return true;
+  } catch (e) {
+    // storage 不可用：退回旧行为（至少刷得动），这种浏览器很少见
+    return true;
+  }
+};
+window._reloadClear = (key) => {
+  try { sessionStorage.removeItem('_reload_' + key); } catch (e) {}
+};
+
 window._getCsrf = () => {
   const m = document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);
   return m ? decodeURIComponent(m[1]) : '';
-};
-// 「因 CSRF 失败自动刷新」只允许发生一次，标记随标签页存亡。
-// sessionStorage 在部分隐私模式下会抛异常，包一层别让它带崩整个 api()。
-window._csrfRetried = () => {
-  try { return sessionStorage.getItem('_csrf_retry') === '1'; } catch (e) { return false; }
-};
-window._csrfMarkRetry = () => {
-  try { sessionStorage.setItem('_csrf_retry', '1'); } catch (e) {}
-};
-window._csrfClearRetry = () => {
-  try { sessionStorage.removeItem('_csrf_retry'); } catch (e) {}
 };
 window.api = async (url, method='GET', body=null) => {
   const headers = {'Content-Type':'application/json'};
@@ -334,14 +343,13 @@ window.api = async (url, method='GET', body=null) => {
     // 除了关标签页没别的办法。宁可停下来把话说清楚。
     if (r.status === 403 && /CSRF/i.test(body)) {
       const hasCookie = /(?:^|;\s*)csrf=/.test(document.cookie);
-      if (window._csrfRetried()) {
+      if (!window._reloadOnce('csrf')) {
         const why = hasCookie
           ? '服务器拒绝了本次令牌，可能是页面停留过久。'
           : '浏览器里没有 csrf cookie —— 通常是 CDN/反向代理缓存了页面，或浏览器拦了 Cookie。';
         window.toast && toast('刷新后仍失败：' + why + '请硬刷新（Ctrl+Shift+R）', 'err');
         return { ok:false, error:'CSRF 校验持续失败。' + why };
       }
-      window._csrfMarkRetry();
       window.toast && toast('会话令牌已过期，页面将自动刷新', 'err');
       setTimeout(() => { location.reload(); }, 1500);
       return { ok:false, error:'CSRF token 过期' };
@@ -352,7 +360,7 @@ window.api = async (url, method='GET', body=null) => {
     }
     return { ok:false, error:`HTTP ${r.status}: ${(body||'').slice(0,200)}` };
   }
-  try { window._csrfClearRetry(); return await r.json(); }
+  try { window._reloadClear('csrf'); return await r.json(); }
   catch(e) { return { ok:false, error:'非 JSON 响应' }; }
 };
 window.toast = (msg, cls='ok') => window.dispatchEvent(new CustomEvent('toast',{detail:{msg,cls}}));

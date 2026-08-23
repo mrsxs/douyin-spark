@@ -29,13 +29,13 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None,
 
 
 def _extract_api_fn() -> str:
-    """把 base.html 里的 _getCsrf + window.api 一起抠出来。
+    """把 base.html 里 api() 依赖的那几个函数连同 api() 一起抠出来。
 
-    api() 里会调 window._getCsrf，只抠 api 的话 node 直接 TypeError。
-    两个函数在文件里紧挨着，从 _getCsrf 开头取到 api 结尾即可。
+    api() 会调 _getCsrf 和 _reloadOnce，少抠一个 node 就 TypeError。
+    这几个函数在文件里紧挨着，从最靠前的 _reloadOnce 取到 api 结尾即可。
     """
     src = BASE_HTML.read_text(encoding="utf-8")
-    start = src.index("window._getCsrf = ")
+    start = src.index("window._reloadOnce = ")
     api_at = src.index("window.api = async", start)
     # 函数以 "};" 单独成行结束
     end = src.index("\n};", api_at) + len("\n};")
