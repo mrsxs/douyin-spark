@@ -95,6 +95,18 @@ python3 tools/issue_license.py \
     --note "客户姓名 - 严格绑定"
 ```
 
+```bash
+cd /Users/apple/code/python/抖音续火花
+
+python3 tools/issue_license.py \
+    --days 7 \
+    --tier pro \
+    --machine d7e726b4e52274c2 \
+    --note "猫子伴"
+```
+
+
+
 输出 license 字符串发给客户。
 
 ### Step 3：客户更新 .env
