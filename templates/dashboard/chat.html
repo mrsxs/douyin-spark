@@ -151,6 +151,16 @@
                 :class="syncing && 'animate-spin'"></iconify-icon>
             </button>
             {#
+              补历史：抖音的 init 接口每个会话只回最近 ~21 条，聊得多一点
+              中间就会留空档。这个按钮走 cmd=301 按游标把整段历史翻回来。
+            #}
+            <button @click="backfillNow()" :disabled="backfilling"
+              class="w-8 h-8 rounded-full hover:bg-ios-fill2 flex items-center justify-center text-ios-label2 disabled:opacity-40"
+              title="从抖音拉回这个会话的历史消息">
+              <iconify-icon icon="lucide:history" width="15" height="15"
+                :class="backfilling && 'animate-spin'"></iconify-icon>
+            </button>
+            {#
               「对谁回复」的入口就放在会话头上 —— 用户想的是「让 AI 替我回这个人」，
               而不是「去设置里找一个白名单列表再勾一遍」。
             #}
@@ -672,7 +682,7 @@ function chat() {
     messages: INIT_MSGS,
     unread: {},
     q: '', draft: '',
-    sending: false, syncing: false, loadingMore: false,
+    sending: false, syncing: false, backfilling: false, loadingMore: false,
     hasMore: INIT_HAS_MORE,
     live: false,
     refresh: localStorage.getItem(REFRESH_KEY) || 'auto',
@@ -858,6 +868,28 @@ function chat() {
       }
       this.syncing = false;
       this.$nextTick(() => this.toBottom());
+    },
+
+    /*
+      从抖音云端补这个会话的历史。sync 只能拿到最近 ~21 条，
+      中间的空档得靠 cmd=301 按游标翻回来。一次可能要几十秒。
+    */
+    async backfillNow() {
+      if (!this.peerUid) return;
+      this.backfilling = true;
+      try {
+        const r = await api(`/api/messages/${ACC_ID}/backfill`, 'POST',
+                            { uid: this.peerUid });
+        if (!r.ok) { toast(r.error || '回填失败', 'err'); return; }
+        toast(r.added > 0
+          ? `补回 ${r.added} 条历史消息`
+          : '已经是完整的了，没有可补的');
+        if (r.added > 0) {
+          const m = await api(`/api/messages/${ACC_ID}/${this.peerUid}`);
+          if (m.ok) { this.messages = m.messages; this.hasMore = m.has_more; }
+          this.$nextTick(() => this.toBottom());
+        }
+      } finally { this.backfilling = false; }
     },
 
     kindIcon(k) {

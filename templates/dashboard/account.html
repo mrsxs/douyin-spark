@@ -69,7 +69,7 @@
   </div>
 </div>
 
-<!-- 4 个 Stat 卡（火花总数 / 今日已续 / 联系人数 / 需重燃） -->
+<!-- 4 个 Stat 卡（火花总数 / 今日已续 / 联系人数 / 火花已断） -->
 {% set max_days = (contacts | map(attribute='days') | list | max) if contacts else 0 %}
 {% set today_sent = (schedule.last_ran_date == now.strftime("%Y-%m-%d")) %}
 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-5">
@@ -104,7 +104,7 @@
   </div>
   <div class="apple-card-solid p-4">
     <div class="flex items-center justify-between">
-      <div class="text-xs text-ios-label3">需重燃</div>
+      <div class="text-xs text-ios-label3">火花已断</div>
       <div class="w-8 h-8 rounded-lg bg-ios-redBg flex items-center justify-center">
         <iconify-icon icon="lucide:flame-kindling" width="16" height="16" class="text-ios-red"></iconify-icon>
       </div>
@@ -189,9 +189,11 @@
     </div>
     <div class="flex-1 text-sm">
       <span class="font-medium text-rose-700 dark:text-rose-300">{{ broken_total }} 位好友的火花已断</span>
-      <span class="text-rose-600/80 dark:text-rose-400/80 ml-1">需要你去抖音 App 主动重续</span>
+      <span class="text-rose-600/80 dark:text-rose-400/80 ml-1">
+        {% if schedule.send_to_broken %}续火花时会照常发给他们，发出去就能续回来{% else %}当前设置跳过了他们，可在下方打开「也发给火花已断的好友」{% endif %}
+      </span>
     </div>
-    <button @click="filter='broken'" class="text-xs font-semibold text-ios-red hover:underline">查看 →</button>
+    <button @click="setFilter('broken')" class="text-xs font-semibold text-ios-red hover:underline">查看 →</button>
   </div>
 </div>
 {% endif %}
@@ -199,9 +201,10 @@
 <!-- 段控 + 搜索 -->
 <div class="flex flex-wrap items-center gap-3 mb-4">
   <div class="ios-seg">
-    <button @click="filter='all'"    class="ios-seg-item" :class="filter==='all' ? 'on' : ''">全部 <span class="ml-0.5 text-ios-label3" x-show="filter!=='all'">{{ filtered_total }}</span></button>
-    <button @click="filter='active'" class="ios-seg-item" :class="filter==='active' ? 'on' : ''">续火花</button>
-    <button @click="filter='broken'" class="ios-seg-item" :class="filter==='broken' ? 'on' : ''">需重燃</button>
+    <button @click="setFilter('all')"    class="ios-seg-item" :class="filter==='all' ? 'on' : ''">全部 <span class="ml-0.5 text-ios-label3" x-show="filter!=='all'">{{ filtered_total }}</span></button>
+    <button @click="setFilter('active')" class="ios-seg-item" :class="filter==='active' ? 'on' : ''">续火花 <span class="ml-0.5 text-ios-label3" x-show="filter!=='active'">{{ active_total }}</span></button>
+    <button @click="setFilter('broken')" class="ios-seg-item" :class="filter==='broken' ? 'on' : ''">已断 <span class="ml-0.5 text-ios-label3" x-show="filter!=='broken'">{{ broken_total }}</span></button>
+    <button @click="setFilter('none')"   class="ios-seg-item" :class="filter==='none' ? 'on' : ''">无火花 <span class="ml-0.5 text-ios-label3" x-show="filter!=='none'">{{ none_total }}</span></button>
   </div>
   <form method="get" action="/accounts/{{ acc.id }}" class="flex-1 min-w-[200px] max-w-md relative">
     <iconify-icon icon="lucide:search" width="16" height="16"
@@ -253,14 +256,18 @@
   {% set tpl = templates.get(uid, {"enabled": False, "messages": []}) %}
   {% set name = c['nickname'] or uid %}
   {% set days = c['days'] %}
-  {% set broken = (c['status'] != 'active') %}
+  {# 三态：active(还在烧) / broken(断了要去 App 重燃) / none(从来没火花的普通好友) #}
+  {% set spark = c['status'] if c['status'] in ('active', 'broken', 'none') else 'broken' %}
+  {% set broken = (spark == 'broken') %}
+  {% set no_spark = (spark == 'none') %}
   <div data-uid="{{ uid }}"
        data-name="{{ name|e }}"
        data-days="{{ days }}"
        data-avatar="{{ c.avatar or '' }}"
+       data-spark="{{ spark }}"
        data-broken="{{ '1' if broken else '0' }}"
        x-data="{ enabled: {{ 'true' if tpl.enabled else 'false' }} }"
-       x-show="filter==='all' || (filter==='active' && !{{ 'true' if broken else 'false' }}) || (filter==='broken' && {{ 'true' if broken else 'false' }})"
+       x-show="filter==='all' || filter==='{{ spark }}'"
        class="contact-card apple-card-solid p-4 transition hover:shadow-apple-lg flex flex-col gap-3 relative overflow-hidden{% if broken %} border-rose-200 dark:border-rose-800/60{% endif %}">
 
     <!-- R1: 勾选 + 头像 + 名字 + iOS toggle -->
@@ -294,19 +301,29 @@
       </label>
     </div>
 
-    <!-- Panel: 橙色火花大数字 + 三态徽章 -->
+    <!-- Panel: 橙色火花大数字 + 状态徽章（无火花的人不给大数字，0 天没意义） -->
     <div class="flex items-center justify-between px-3 py-2.5 rounded-xl
-                {% if broken %}bg-ios-redBg/60{% else %}bg-ios-tintBg/70{% endif %}">
+                {% if broken %}bg-ios-redBg/60{% elif no_spark %}bg-ios-fill2 dark:bg-slate-700/40{% else %}bg-ios-tintBg/70{% endif %}">
       <div class="flex items-center gap-1.5">
-        <iconify-icon icon="lucide:{{ 'flame-kindling' if broken else 'flame' }}" width="22" height="22"
-                      class="{% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}"></iconify-icon>
-        <span class="text-2xl font-extrabold leading-none {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}">{{ days }}</span>
-        <span class="text-xs font-medium {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}/80">天</span>
+        {% if no_spark %}
+          <iconify-icon icon="lucide:flame-off" width="20" height="20" class="text-ios-label3"></iconify-icon>
+          <span class="text-sm font-medium text-ios-label3">还没有火花</span>
+        {% else %}
+          <iconify-icon icon="lucide:{{ 'flame-kindling' if broken else 'flame' }}" width="22" height="22"
+                        class="{% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}"></iconify-icon>
+          <span class="text-2xl font-extrabold leading-none {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}">{{ days }}</span>
+          <span class="text-xs font-medium {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}/80">天</span>
+        {% endif %}
       </div>
       {% if broken %}
         <span class="apple-chip-red">
           <iconify-icon icon="lucide:flame-kindling" width="11" height="11"></iconify-icon>
-          需重燃
+          火花已断
+        </span>
+      {% elif no_spark %}
+        <span class="apple-chip-gray">
+          <iconify-icon icon="lucide:user" width="11" height="11"></iconify-icon>
+          普通好友
         </span>
       {% elif today_sent %}
         <span class="apple-chip-green">
@@ -344,12 +361,29 @@
 
 <!-- 联系人 Grid -->
 {% if contacts %}
-<div class="flex items-center gap-2 mb-3 text-sm text-ios-label2">
+<div class="flex flex-wrap items-center gap-2 mb-3 text-sm text-ios-label2">
   <label class="inline-flex items-center gap-2 cursor-pointer">
+    <!-- 只勾当前段控看得见的卡片：切到「续火花」再点全选，不该把隐藏的已断火花也选上 -->
     <input type="checkbox" id="select-all" onchange="toggleAll(this)"
            class="w-4 h-4 accent-ios-tint cursor-pointer" />
-    全选本页
+    <span x-text="filter==='all' ? '全选本页' : '全选当前分组'"></span>
   </label>
+  <span x-show="selectedCount>0" x-cloak class="text-ios-label3">
+    已选 <span class="font-semibold text-ios-label dark:text-slate-100" x-text="selectedCount"></span> 人
+  </span>
+  <div x-show="selectedCount>0" x-cloak class="flex items-center gap-2 ml-auto">
+    <button @click="bulkEnabled(true)" :disabled="bulkBusy"
+            class="apple-btn-sec text-xs !px-3 !py-1.5">
+      <iconify-icon icon="lucide:flame" width="13" height="13"></iconify-icon>
+      批量开启续火花
+    </button>
+    <button @click="bulkEnabled(false)" :disabled="bulkBusy"
+            class="apple-btn-sec text-xs !px-3 !py-1.5">
+      <iconify-icon icon="lucide:flame-off" width="13" height="13"></iconify-icon>
+      批量关闭
+    </button>
+    <button @click="clearSelection()" class="text-xs text-ios-label3 hover:underline">清空</button>
+  </div>
 </div>
 <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
   {% for c in contacts %}{{ contact_card(c) }}{% endfor %}
@@ -373,7 +407,7 @@
 {% endif %}
 {% else %}
 <div class="apple-card-solid p-12 text-center text-ios-label3">
-  {% if q %}没有匹配「{{ q }}」的联系人{% else %}暂无火花联系人{% endif %}
+  {% if q %}没有匹配「{{ q }}」的联系人{% else %}暂无联系人{% endif %}
 </div>
 {% endif %}
 
@@ -416,13 +450,45 @@
       </div>
     </div>
     <div class="space-y-3 mt-4"
-         x-data="{ on: {{ 'true' if schedule.enabled else 'false' }} }">
+         x-data="{ on: {{ 'true' if schedule.enabled else 'false' }},
+                   broken: {{ 'true' if schedule.send_to_broken else 'false' }},
+                   noSpark: {{ 'true' if schedule.send_to_no_spark else 'false' }} }">
       <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
         <span class="text-sm font-medium text-ios-label dark:text-slate-100">启用每日定时</span>
         <input type="checkbox" id="sch-en" {% if schedule.enabled %}checked{% endif %} class="sr-only"
                @change="on=$event.target.checked; saveSchedule()" />
         <div class="ios-switch" :class="on ? 'ios-switch-on' : 'ios-switch-off'"
              @click="document.getElementById('sch-en').click()">
+          <div class="ios-switch-knob"></div>
+        </div>
+      </label>
+      <!-- 已断火花：默认开。直接发消息就能把断掉的火花续回来 -->
+      <label class="flex items-start justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <span class="min-w-0">
+          <span class="block text-sm font-medium text-ios-label dark:text-slate-100">也发给火花已断的好友</span>
+          <span class="block text-xs text-ios-label3 mt-0.5 leading-relaxed">
+            断掉的火花直接发消息就能续上，默认开启。
+          </span>
+        </span>
+        <input type="checkbox" id="sch-broken" {% if schedule.send_to_broken %}checked{% endif %} class="sr-only"
+               @change="broken=$event.target.checked; saveSchedule()" />
+        <div class="ios-switch shrink-0 mt-0.5" :class="broken ? 'ios-switch-on' : 'ios-switch-off'"
+             @click="document.getElementById('sch-broken').click()">
+          <div class="ios-switch-knob"></div>
+        </div>
+      </label>
+      <!-- 无火花的普通好友：默认关。这是主动搭讪，不是续火花 -->
+      <label class="flex items-start justify-between gap-3 p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <span class="min-w-0">
+          <span class="block text-sm font-medium text-ios-label dark:text-slate-100">也发给没有火花的普通好友</span>
+          <span class="block text-xs text-ios-label3 mt-0.5 leading-relaxed">
+            对方从来没和你烧起火花，发过去属于主动搭讪，风控面更大。默认关闭。
+          </span>
+        </span>
+        <input type="checkbox" id="sch-nospark" {% if schedule.send_to_no_spark %}checked{% endif %} class="sr-only"
+               @change="noSpark=$event.target.checked; saveSchedule()" />
+        <div class="ios-switch shrink-0 mt-0.5" :class="noSpark ? 'ios-switch-on' : 'ios-switch-off'"
+             @click="document.getElementById('sch-nospark').click()">
           <div class="ios-switch-knob"></div>
         </div>
       </label>
@@ -676,6 +742,7 @@ function accountPage() {
   return {
     filter: 'all',
     running: false,
+    bulkBusy: false,
     batchRunning: false,
     checking: false,
     runAutoConfirm: false,
@@ -853,6 +920,48 @@ function accountPage() {
       this.openSend(targets);
     },
     previewSend(uid, name) { this.openSend([{uid, name}]); },
+    // —— 选择与批量开关 ——
+    setFilter(f) {
+      // 换分组时清掉选择：留着上一组的勾会让「已选 N 人」和眼前的卡片对不上，
+      // 下一步批量操作就落到看不见的人身上了
+      this.filter = f;
+      this.clearSelection();
+    },
+    clearSelection() {
+      document.querySelectorAll('.contact-select').forEach(x => { x.checked = false; });
+      const all = document.getElementById('select-all');
+      if (all) all.checked = false;
+      this.selectedCount = 0;
+    },
+    async bulkEnabled(enabled) {
+      const boxes = Array.from(document.querySelectorAll('.contact-select:checked'));
+      if (!boxes.length) { toast('请先勾选联系人', 'err'); return; }
+      const uids = boxes.map(x => x.value);
+      this.bulkBusy = true;
+      try {
+        const r = await api('/api/templates/{{ acc.id }}/bulk-enabled', 'PUT', {uids, enabled});
+        if (!r.ok) { toast(r.error || '失败', 'err'); return; }
+        // 就地更新卡片开关和本地缓存，不整页 reload
+        boxes.forEach(x => {
+          const card = x.closest('[data-uid]');
+          const uid = card.dataset.uid;
+          const cur = TPL_CACHE[uid] || {enabled:false, messages:[]};
+          TPL_CACHE[uid] = {enabled, messages: cur.messages || []};
+          try { Alpine.$data(card).enabled = enabled; } catch (_) {}
+        });
+        toast(`已${enabled ? '开启' : '关闭'} ${r.updated} 人的自动续火花`);
+        // 开关拨亮了不等于发得出去：自己没话术的人会兜底到通用模板，
+        // 通用模板关着或为空就一条都不发 —— 这时候不提示，用户会以为坏了
+        if (enabled) {
+          const defOn = !!(document.getElementById('def-en') || {}).checked
+                        && DEFAULT_MSGS.length > 0;
+          const naked = uids.filter(u => !((TPL_CACHE[u] || {}).messages || []).length);
+          if (naked.length && !defOn) {
+            toast(`${naked.length} 人还没有话术，通用模板也没开/为空，到点不会发送`, 'err');
+          }
+        }
+      } finally { this.bulkBusy = false; }
+    },
     // —— 模板编辑弹窗 ——
     openTplEdit({uid, name, days, avatar, messages, enabled}) {
       this.tplModal = { open:true, uid, name, days, avatar, enabled, messages: messages.slice() };
@@ -948,8 +1057,18 @@ function openShareCard(card) {
   });
 }
 
+// 当前段控下真正露在页面上的卡片。
+// 原来 toggleAll 抓的是全部 .contact-select，切到「续火花」点全选会把
+// 隐藏的已断/无火花也一起选上 —— 用户看不见却发出去了。
+function visibleSelects() {
+  const f = (window._accountPage && window._accountPage.filter) || 'all';
+  return Array.from(document.querySelectorAll('.contact-card')).filter(card =>
+    f === 'all' || (card.dataset.spark || 'active') === f
+  ).map(card => card.querySelector('.contact-select')).filter(Boolean);
+}
+
 function toggleAll(el) {
-  document.querySelectorAll('.contact-select').forEach(x => { x.checked = el.checked; });
+  visibleSelects().forEach(x => { x.checked = el.checked; });
   updateSelectedCount();
 }
 function updateSelectedCount() {
@@ -974,7 +1093,10 @@ async function saveDefault() {
 async function saveSchedule() {
   const enabled = document.getElementById('sch-en').checked;
   const time = document.getElementById('sch-time').value;
-  const r = await api('/api/schedule/{{ acc.id }}', 'PUT', {enabled, time});
+  const send_to_broken = document.getElementById('sch-broken').checked;
+  const send_to_no_spark = document.getElementById('sch-nospark').checked;
+  const r = await api('/api/schedule/{{ acc.id }}', 'PUT',
+                      {enabled, time, send_to_broken, send_to_no_spark});
   toast(r.ok ? '定时已保存' : r.error, r.ok ? 'ok' : 'err');
 }
 </script>

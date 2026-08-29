@@ -171,6 +171,71 @@ def test_load_cached_empty_account(db, acc):
     assert cs.load_cached(db, acc.id) == []
 
 
+# ── 无火花好友（status="none"）────────────────────────────────────
+
+NO_SPARK = {"uid": "333", "nickname": "普通好友", "conv_id": "c3", "days": 0,
+            "avatar": "", "status": "none"}
+
+
+def test_none_status_is_persisted(db, acc):
+    """include_all 解析出来的无火花好友要能存进冷备。"""
+    cs.upsert_cache(db, acc.id, [NO_SPARK]); db.commit()
+    row = db.query(Contact).filter(Contact.uid == "333").first()
+    assert row.status == "none"
+    assert row.days == 0
+
+
+def test_none_never_downgrades_a_burning_contact(db, acc):
+    """核心保护：解析抖动把有火花的人认成 none 时，不能覆盖库里的真实火花。
+
+    解析是拿正则打 protobuf 的，窗口一偏就会漏掉 consecutive_chat ——
+    历史上「甜豆包」「Momo」就因为窗口没上界串过天数。真覆盖下去，
+    用户看到的是 342 天一夜变 0 天。
+    """
+    cs.upsert_cache(db, acc.id, SAMPLE); db.commit()   # 111 active/30 天
+
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "111", "nickname": "小明", "conv_id": "c1",
+         "days": 0, "avatar": "", "status": "none"},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "111").first()
+    assert row.status == "active", "有火花的人被降级成了无火花"
+    assert row.days == 30, "火花天数被 0 覆盖了"
+
+
+def test_none_does_not_downgrade_broken_either(db, acc):
+    """broken 也是「有过火花」，同样不能被 none 抹掉 —— 那是要去 App 重燃的人。"""
+    cs.upsert_cache(db, acc.id, SAMPLE); db.commit()   # 222 broken/5 天
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "222", "nickname": "小红", "conv_id": "c2",
+         "days": 0, "avatar": "", "status": "none"},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "222").first()
+    assert row.status == "broken"
+    assert row.days == 5
+
+
+def test_none_to_active_upgrade_still_works(db, acc):
+    """反向升级要照常：无火花的人今天续上了，得如实更新。"""
+    cs.upsert_cache(db, acc.id, [NO_SPARK]); db.commit()
+    cs.upsert_cache(db, acc.id, [
+        {**NO_SPARK, "days": 1, "status": "active"},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "333").first()
+    assert row.status == "active"
+    assert row.days == 1
+
+
+def test_load_cached_sorts_none_last(db, acc):
+    """段控顺序：续火花 → 需重燃 → 无火花。"""
+    cs.upsert_cache(db, acc.id, [*SAMPLE, NO_SPARK]); db.commit()
+    out = cs.load_cached(db, acc.id)
+    assert [c["status"] for c in out] == ["active", "broken", "none"]
+
+
 # ── 新鲜度 ───────────────────────────────────────────────────────
 
 def test_last_synced_reports_none_when_empty(db, acc):
@@ -210,3 +275,40 @@ def test_account_page_does_not_call_douyin(db, acc, login, monkeypatch):
     assert r.status_code == 200
     assert called["n"] == 0
     assert "小明" in r.text, "冷备数据没被渲染出来"
+
+
+# ── conversation_short_id（拉历史消息要用）─────────────────────────
+
+def test_conv_short_id_is_persisted(db, acc):
+    """parse_fire_streaks 给了 conversation_short_id，得存下来 ——
+    cmd=301 拉历史消息必须带它，不存就得每次重打 1.5MB 的 init 去要。"""
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "111", "nickname": "小明", "conv_id": "0:1:9:8", "days": 3,
+         "status": "active", "conversation_short_id": 7610461610200629770},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "111").first()
+    assert row.conv_short_id == 7610461610200629770
+
+
+def test_conv_short_id_survives_refresh_without_it(db, acc):
+    """某次解析没带出 short_id 时，不能把已存的抹成 0 —— 那条会话就再也拉不了历史。"""
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "111", "conv_id": "0:1:9:8", "days": 3, "status": "active",
+         "conversation_short_id": 555},
+    ]); db.commit()
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "111", "conv_id": "0:1:9:8", "days": 4, "status": "active"},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "111").first()
+    assert row.conv_short_id == 555
+
+
+def test_load_cached_exposes_conv_short_id(db, acc):
+    cs.upsert_cache(db, acc.id, [
+        {"uid": "111", "conv_id": "0:1:9:8", "days": 3, "status": "active",
+         "conversation_short_id": 777},
+    ]); db.commit()
+    out = {c["uid"]: c for c in cs.load_cached(db, acc.id)}
+    assert out["111"]["conversation_short_id"] == 777

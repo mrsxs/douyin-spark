@@ -21,6 +21,10 @@ import douyin_im as dy
 
 router = APIRouter(prefix="/api")
 
+# 批量拨开关的上限。比 jobs.MAX_BATCH_UIDS(200) 宽松得多 ——
+# 这里只写本地 DB，不打抖音接口，没有风控代价
+MAX_BULK_UIDS = 1000
+
 
 def _safe_err(e: Exception, fallback: str = "操作失败，请稍后重试") -> str:
     """过滤异常信息给前端。业务异常（NotReady / AlreadyRunning / ValueError）保留原文；
@@ -199,6 +203,40 @@ def api_messages_sync(
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": _safe_err(e)}
+
+
+@router.post("/messages/{account_id}/backfill")
+def api_messages_backfill(
+    account_id: int,
+    payload: dict = Body(default={}),
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """从抖音云端把历史消息拉回来，补上冷备表的空档。
+
+    payload: {uid?: str} —— 给了 uid 只回填那一个会话，不给就整账号。
+
+    Why 不放进 scheduler：整账号回填要打几十上百个请求，做成定时任务
+    等于常态化扩大风控面。这是用户按需触发的一次性补救。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id,
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "账户不存在")
+
+    uid = str((payload or {}).get("uid") or "").strip()
+    try:
+        if uid:
+            r = trigger.backfill_history(user.id, acc.id, uid)
+            if r.get("error"):
+                return {"ok": False, "error": r["error"]}
+            return {"ok": True, **r}
+        return {"ok": True, **trigger.backfill_all(user.id, acc.id)}
+    except Exception as e:
+        traceback.print_exc()
+        return {"ok": False, "error": _safe_err(e)}
+
 
 
 
@@ -453,6 +491,67 @@ def api_update_template(
         return {"ok": False, "error": _safe_err(e)}
 
 
+@router.put("/templates/{account_id}/bulk-enabled")
+def api_bulk_template_enabled(
+    account_id: int,
+    payload: dict = Body(...),
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """批量拨「自动续火花」开关。payload: {uids: [...], enabled: bool}
+
+    Why 不让前端逐个打 /api/template/{id}/{uid}：全选几十上百人时那是
+    几十上百个请求 + 同样次数的 templates.json 原子写。这里一次 commit、
+    一次备份。
+
+    只动 enabled，不碰 messages —— 用户写好的话术不能被一次误点抹掉。
+    uid 没有 entry 时**新建**：douyin_im._pick_message 对没有 entry 的
+    联系人直接跳过，不建的话开关拨亮了也一条发不出去（无火花好友首次
+    启用就是这个情形）。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id, DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404)
+
+    enabled = bool(payload.get("enabled", True))
+    seen, uids = set(), []
+    for raw in (payload.get("uids") or []):
+        s = str(raw).strip()
+        # "default" 是全局兜底模板不是联系人，混进来会把兜底一起关掉
+        if not s or s == "default" or s in seen:
+            continue
+        seen.add(s)
+        uids.append(s)
+    if not uids:
+        return {"ok": False, "error": "请至少选择一个联系人"}
+    if len(uids) > MAX_BULK_UIDS:
+        return {"ok": False, "error": f"一次最多操作 {MAX_BULK_UIDS} 个联系人"}
+
+    try:
+        from ..models import Contact
+        from .. import templates_service
+        # 一次查完昵称，别在循环里逐个打 DB
+        names = {c.uid: c.nickname for c in db.query(Contact).filter(
+            Contact.douyin_account_id == account_id,
+            Contact.uid.in_(uids)).all() if c.nickname}
+        for uid in uids:
+            templates_service.upsert_template(
+                db, account_id, uid,
+                name=names.get(uid), enabled=enabled, messages=None,
+            )
+        db.add(AuditLog(actor_user_id=user.id, actor_kind="user",
+                        action="template_bulk_enabled",
+                        target_type="account", target_id=str(acc.id),
+                        meta=json.dumps({"enabled": enabled, "count": len(uids)})))
+        db.commit()
+        templates_service.sync_json_backup(account_id)
+        return {"ok": True, "updated": len(uids), "enabled": enabled}
+    except Exception as e:
+        traceback.print_exc()
+        return {"ok": False, "error": _safe_err(e)}
+
+
 @router.get("/schedule/{account_id}")
 def api_get_schedule(account_id: int, user=Depends(require_active), db: Session = Depends(get_db)):
     acc = db.query(DouyinAccount).filter(
@@ -461,8 +560,12 @@ def api_get_schedule(account_id: int, user=Depends(require_active), db: Session 
         raise HTTPException(404)
     sch = db.query(Schedule).filter(Schedule.douyin_account_id == acc.id).first()
     if not sch:
-        return {"ok": True, "enabled": False, "time": "09:00"}
-    return {"ok": True, "enabled": sch.enabled, "time": sch.time_hhmm}
+        # 和 Schedule 的列默认值保持一致，别让「还没建行」看起来像另一套行为
+        return {"ok": True, "enabled": False, "time": "09:00",
+                "send_to_broken": True, "send_to_no_spark": False}
+    return {"ok": True, "enabled": sch.enabled, "time": sch.time_hhmm,
+            "send_to_broken": bool(sch.send_to_broken),
+            "send_to_no_spark": bool(sch.send_to_no_spark)}
 
 
 @router.put("/schedule/{account_id}")
@@ -492,9 +595,16 @@ def api_set_schedule(
         sch.last_ran_date = None
     sch.enabled = enabled
     sch.time_hhmm = t
+    # 缺字段时保持原值：老前端/其它调用方不带它，不能把用户的选择悄悄改掉
+    if "send_to_broken" in payload:
+        sch.send_to_broken = bool(payload["send_to_broken"])
+    if "send_to_no_spark" in payload:
+        sch.send_to_no_spark = bool(payload["send_to_no_spark"])
     db.add(AuditLog(actor_user_id=user.id, actor_kind="user", action="schedule_update",
                     target_type="account", target_id=str(acc.id),
-                    meta=json.dumps({"enabled": enabled, "time": t})))
+                    meta=json.dumps({"enabled": enabled, "time": t,
+                                     "send_to_broken": bool(sch.send_to_broken),
+                                     "send_to_no_spark": bool(sch.send_to_no_spark)})))
     db.commit()
     return {"ok": True}
 

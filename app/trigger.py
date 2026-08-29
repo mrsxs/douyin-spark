@@ -12,7 +12,7 @@ from datetime import datetime
 import douyin_im as dy
 from .storage import AccountCtx, set_account_ctx
 from .db import SessionLocal
-from .models import DouyinAccount, AuditLog, Schedule, JobRun, JobRunItem
+from .models import DouyinAccount, AuditLog, Schedule, JobRun, JobRunItem, Contact
 from .notify import notify
 # 模块级导入，不能只在函数里 import：_ensure_active 里也用到它。
 # 少了这行在纯 Python 下只是被 try/except 吞掉的 NameError（头像永远补不上，
@@ -109,13 +109,18 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
     )
     if resp.status_code != 200 or len(resp.content) < 1024:
         raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
-    contacts = dy.parse_fire_streaks(resp.content)
-    # 诊断：统计 init 响应里所有私聊 conv_id 个数，对比解析出的火花条目数
+    # include_all：连一条火花标记都没有的普通好友也带出来（status="none"）。
+    # 用户要「不管有没有火花都能选」，那些人只能从这条路进联系人列表；
+    # 是否真给他们发消息，由 Schedule.send_to_broken 决定，和这里无关。
+    contacts = dy.parse_fire_streaks(resp.content, include_all=True)
+    # 诊断：统计 init 响应里所有私聊 conv_id 个数，对比解析出的各状态条目数
     try:
         import re as _re
         all_convs = set(m.group() for m in _re.finditer(rb'0:[12]:\d+:\d+', resp.content))
+        _n_spark = sum(1 for c in contacts if c.get("status") != "none")
         dy._log(f"[ensure_active] init resp={len(resp.content)}B, "
-                f"conv_ids={len(all_convs)} 个, 解析出火花联系人={len(contacts)} 个", "INFO")
+                f"conv_ids={len(all_convs)} 个, 解析出联系人={len(contacts)} 个"
+                f"（其中有火花痕迹 {_n_spark} 个）", "INFO")
     except Exception:
         pass
     # 顺手把 self uid + avatar 写回 DouyinAccount（dashboard 显示真实头像用）
@@ -204,6 +209,125 @@ def poll_new_messages(user_id: int, account_id: int) -> list[dict]:
         added = messages_service.sync_and_collect(db, account_id, msgs)
         db.commit()
     return added
+
+
+def _read_init_req() -> bytes:
+    """读当前账户的 init_req.bin。调用前 set_account_ctx 必须已经设过。"""
+    path = str(dy.INIT_REQ_BIN)
+    if not os.path.exists(path):
+        raise NotReady("init_req.bin 不存在（登录时未抓到会话数据）")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _resolve_my_uid(conv_id: str, peer_uid: str, account_dy_uid: str | None) -> str:
+    """判断「我」的 uid —— parse_messages 靠它区分左右两边的气泡。
+
+    Why 不用 dy.extract_my_uid：那个是从 init **响应**里按 uid 频次反推的，
+    喂 init_req.bin（请求体，几百字节、没有会话列表）永远返回空串，
+    结果整段历史全被判成对方发的，聊天页里挤成一边。
+
+    conv_id 形如 0:<type>:<uid_a>:<uid_b>，去掉对方那个剩下的就是我 ——
+    纯本地推导，不依赖频次也不依赖网络。格式不对时退回账户表里的 dy_uid。
+    """
+    parts = (conv_id or "").split(":")
+    if len(parts) == 4:
+        a, b = parts[2], parts[3]
+        if a == str(peer_uid) and b != str(peer_uid):
+            return b
+        if b == str(peer_uid) and a != str(peer_uid):
+            return a
+    return str(account_dy_uid or "")
+
+
+def backfill_history(user_id: int, account_id: int, uid: str,
+                     max_pages: int = 40) -> dict:
+    """把一个会话的历史消息从抖音云端拉回来，补进冷备表。
+
+    Why: get_message_by_init 每个会话只回最近 ~21 条，两次同步之间聊得多一点，
+    中间就是永久空档。cmd=301 带 cursor 能翻完整个会话，已经丢的也追得回来。
+
+    只读接口 + 幂等入库（按 server_msg_id 去重），重复跑不会翻倍。
+    conv_short_id 缺失时直接返回 error，不去打无效请求。
+    """
+    from . import messages_service
+
+    ctx = AccountCtx(user_id=user_id, account_id=account_id)
+    set_account_ctx(ctx)
+
+    with SessionLocal() as db:
+        row = (db.query(Contact)
+                 .filter(Contact.douyin_account_id == account_id,
+                         Contact.uid == str(uid))
+                 .first())
+        if not row:
+            return {"added": 0, "error": f"联系人 {uid} 不在冷备表里"}
+        conv_id, short_id = row.conv_id or "", row.conv_short_id
+        nickname = row.nickname or uid
+        acc = db.get(DouyinAccount, account_id)
+        my_uid = _resolve_my_uid(conv_id, str(uid), acc.dy_uid if acc else None)
+
+    if not short_id or not conv_id:
+        # short_id 是 parse_fire_streaks 顺带解析的，老数据没有 ——
+        # 刷新一次联系人就会补上，让用户知道该怎么办
+        return {"added": 0,
+                "error": f"{nickname} 缺会话 id，请先刷新一次联系人再回填"}
+    if not my_uid:
+        # my_uid 是 parse_messages 分左右两边的唯一依据。空串会让整段历史
+        # 都判成对方发的 —— 宁可不回填，也不能静默灌一批躺错边的数据。
+        return {"added": 0,
+                "error": f"认不出你自己的 uid（{nickname} 的会话 id 异常），"
+                         f"请先刷新一次联系人再回填"}
+
+    session = dy._load_session()
+    if not session:
+        raise NotReady("cookies 无效")
+    init_bytes = _read_init_req()
+
+    msgs = dy.fetch_history(session, init_bytes, conv_id=conv_id,
+                            conv_short_id=int(short_id),
+                            my_uid=my_uid, max_pages=max_pages)
+    if not msgs:
+        return {"added": 0, "fetched": 0, "nickname": nickname}
+
+    with SessionLocal() as db:
+        added = messages_service.sync_messages(db, account_id, msgs)
+        # 云端是权威：库里躺错边的历史（早期回填 my_uid 判错留下的）在这里纠正
+        fixed = messages_service.fix_is_me(db, account_id, msgs)
+        db.commit()
+    dy._log(f"[history] {nickname}: 拉到 {len(msgs)} 条，新增 {added} 条"
+            + (f"，纠正 {fixed} 条方向" if fixed else ""), "INFO")
+    return {"added": added, "fetched": len(msgs), "fixed": fixed,
+            "nickname": nickname}
+
+
+def backfill_all(user_id: int, account_id: int, max_pages: int = 40) -> dict:
+    """回填整个账号所有会话的历史。
+
+    逐个会话串行跑，单个失败不影响其它 —— 回填一次要打几十上百个请求，
+    中途因为一个会话抽风就整轮放弃，用户得从头再来。
+    """
+    with SessionLocal() as db:
+        uids = [r.uid for r in db.query(Contact).filter(
+            Contact.douyin_account_id == account_id,
+            Contact.conv_short_id.isnot(None)).all()]
+
+    total_added = done = failed = 0
+    for uid in uids:
+        try:
+            r = backfill_history(user_id, account_id, uid, max_pages=max_pages)
+            if r.get("error"):
+                failed += 1
+            else:
+                total_added += r.get("added", 0)
+                done += 1
+        except Exception as e:
+            failed += 1
+            print(f"[history] 回填 uid={uid} 失败: {e}")
+    dy._log(f"[history] 全量回填完成：{done}/{len(uids)} 个会话，"
+            f"新增 {total_added} 条，失败 {failed}", "DONE")
+    return {"contacts": done, "added": total_added, "failed": failed,
+            "total": len(uids)}
 
 
 def get_contacts(user_id: int, account_id: int) -> tuple[list[dict], dict]:
@@ -312,6 +436,8 @@ def _send_batch_locked(user_id: int, account_id: int, uids: list[str],
                         "ok": ok, "detail": detail})
         _write_item(run_id, str(uid), c.get("nickname"), c.get("conv_id"),
                     text, ok, detail)
+        if ok:
+            _record_sent_message(account_id, str(uid), c.get("conv_id"), text)
 
     with SessionLocal() as db:
         r = db.get(JobRun, run_id)
@@ -339,6 +465,29 @@ def _write_item(run_id: int, uid: str, nickname: str | None,
             db.commit()
     except Exception as e:
         print(f"[batch] 写 JobRunItem 失败: {e}")
+
+
+def _record_sent_message(account_id: int, uid: str, conv_id: str | None,
+                         text: str) -> None:
+    """把刚发出去的消息写进聊天记录。
+
+    Why: 抖音的 get_message_by_init 每个会话只回最近 ~21 条，续火花发的消息
+    要等下次同步才捞得回来 —— 中间对方多聊几句就永久没了。真实数据里
+    6 条成功续火花有 4 条不在聊天表。/api/send 和 AI 回复早就这么做了，
+    auto_run 和 send_batch 一直漏着。
+
+    写的是负数 server_msg_id 占位行，下次 init 同步时 messages_service._claim
+    按 (peer_uid, text) 认领并换成抖音的真 id，不会留重复。
+
+    附带动作：失败只记日志，绝不能连累发送主流程。
+    """
+    try:
+        from . import messages_service
+        with SessionLocal() as db:
+            messages_service.append_local(db, account_id, uid, text, conv_id)
+            db.commit()
+    except Exception as e:
+        print(f"[send] 写聊天记录失败 uid={uid}: {e}")
 
 
 def format_send_detail(info: dict) -> str:
@@ -427,13 +576,28 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
             templates = {}
 
     sent = skipped = failed = 0
-    # 火花已断（status=broken）需在抖音 web 主动「续火花/重燃」，脚本直接发消息无法重燃，
-    # 自动续火花只针对仍在燃烧的 active 联系人；broken 计入 skipped 不发送，避免无效击打风控。
-    broken = [c for c in contacts if c.get("status") == "broken"]
-    if broken:
-        skipped += len(broken)
-        dy._log(f"[auto] 跳过 {len(broken)} 个需重燃（火花已断）联系人", "INFO")
-    contacts = [c for c in contacts if c.get("status", "active") == "active"]
+    # 谁进发送集合，由两个账户级开关决定：
+    #   active   —— 火花在烧，永远发
+    #   broken   —— 火花断了，直接发消息就能续上 → send_to_broken，默认开
+    #   none     —— 从来没火花的普通好友，属于主动搭讪 → send_to_no_spark，默认关
+    with SessionLocal() as db:
+        sch = db.query(Schedule).filter(
+            Schedule.douyin_account_id == account_id).first()
+        to_broken = bool(sch.send_to_broken) if sch else True
+        to_no_spark = bool(sch.send_to_no_spark) if sch else False
+
+    allowed = {"active"}
+    if to_broken:
+        allowed.add("broken")
+    if to_no_spark:
+        allowed.add("none")
+
+    excluded = [c for c in contacts if c.get("status", "active") not in allowed]
+    if excluded:
+        skipped += len(excluded)
+        dy._log(f"[auto] 跳过 {len(excluded)} 个联系人"
+                f"（send_to_broken={to_broken}, send_to_no_spark={to_no_spark}）", "INFO")
+    contacts = [c for c in contacts if c.get("status", "active") in allowed]
     # 回填进度分母：启动时还不知道要发几个（得先调抖音 API），
     # 前端在 total==0 期间显示「准备中」，拿到这里的值后才有百分比。
     try:
@@ -493,6 +657,9 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
                 db.commit()
         except Exception as _e:
             print(f"[auto] 写 JobRunItem 失败: {_e}")
+        # 发出去的也要进聊天记录
+        if item_ok:
+            _record_sent_message(account_id, c["uid"], c.get("conv_id"), msg)
 
         # 连续失败熔断：避免持续击打风控
         if consecutive_fail >= 5:

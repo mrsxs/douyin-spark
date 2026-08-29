@@ -71,6 +71,11 @@ def init_db():
         ("ai_reply_configs", "fewshot", "TEXT DEFAULT ''"),
         # 老库里已有的行要默认开着思考，保持升级前后行为一致
         ("ai_reply_configs", "thinking", "BOOLEAN DEFAULT 1"),
+        # 已断火花默认照发（直接发消息就能续上）；没火花的普通好友默认不发
+        ("schedules", "send_to_broken", "BOOLEAN DEFAULT 1"),
+        ("schedules", "send_to_no_spark", "BOOLEAN DEFAULT 0"),
+        # 拉历史消息（cmd=301）要带的会话数字 id
+        ("contacts", "conv_short_id", "BIGINT"),
     ]
     with engine.begin() as conn:
         for sql in ddl:

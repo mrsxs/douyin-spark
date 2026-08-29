@@ -229,7 +229,10 @@ def account_page(
                     or q_lower in (c.get("remark") or "").lower()]
     filtered_total = len(contacts)
     active_total = sum(1 for c in contacts if c.get("status", "active") == "active")
-    broken_total = filtered_total - active_total
+    # none = 从来没有火花的普通好友（include_all 解析出来的）；
+    # 和 broken 分开计数，段控要分四段，红色横幅也只该为 broken 报警
+    none_total = sum(1 for c in contacts if c.get("status") == "none")
+    broken_total = filtered_total - active_total - none_total
     per_page = 30
     total_pages = max(1, (filtered_total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
@@ -255,6 +258,7 @@ def account_page(
         "q": q, "page": page, "total_pages": total_pages,
         "full_total": full_total, "filtered_total": filtered_total,
         "active_total": active_total, "broken_total": broken_total,
+        "none_total": none_total,
         "per_page": per_page,
         "now": datetime.now(),
     })

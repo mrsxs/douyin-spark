@@ -188,6 +188,36 @@ def _claim(pending: dict[tuple, list[ChatMessage]], m: dict) -> dict | None:
     return out
 
 
+def fix_is_me(db: Session, account_id: int, messages: list[dict]) -> int:
+    """按云端数据纠正已入库消息的 is_me，返回纠正条数。
+
+    Why: sync_and_collect 按 server_msg_id 去重，已存在的行原样不动。
+    早期回填传错了 my_uid（喂的是 init_req.bin，提取结果恒为空串），
+    整段历史被判成对方发的，聊天页里全挤在左边 —— 光修根因救不了那批数据，
+    得让重跑回填能把方向掰回来。
+
+    只动 is_me 一个字段：文本/时间/媒体以库里的为准，避免把用户看过的
+    内容改掉。不 commit，由调用方决定事务边界。
+    """
+    wanted = {m["server_msg_id"]: bool(m.get("is_me"))
+              for m in messages if m.get("server_msg_id")}
+    if not wanted:
+        return 0
+    rows = db.scalars(
+        select(ChatMessage).where(
+            ChatMessage.douyin_account_id == account_id,
+            ChatMessage.server_msg_id.in_(list(wanted)),
+        )
+    ).all()
+    fixed = 0
+    for r in rows:
+        want = wanted.get(r.server_msg_id)
+        if want is not None and bool(r.is_me) != want:
+            r.is_me = want
+            fixed += 1
+    return fixed
+
+
 def load_conversation(db: Session, account_id: int, peer_uid: str,
                       limit: int = DEFAULT_LIMIT,
                       before: int | None = None,

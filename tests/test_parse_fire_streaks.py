@@ -67,6 +67,80 @@ def test_empty_when_no_streaks():
     assert dy.parse_fire_streaks(b"no streaks here") == []
 
 
+# ── include_all：把从来没有火花的会话也带出来 ──────────────
+
+def _build_blob_with_bare() -> bytes:
+    """在三个有火花的会话之外，多一个完全没有火花标记的裸会话 444。"""
+    sep = b"\x00" * 16
+    return _build_blob() + b"0:1:999:444" + sep
+
+
+def test_默认不返回无火花会话(monkeypatch):
+    """回归护栏：默认参数必须逐字节保持老行为，老用户升级后火花人数不能变。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    uids = {c["uid"] for c in dy.parse_fire_streaks(_build_blob_with_bare())}
+    assert uids == {"111", "222", "333"}
+
+
+def test_include_all_带出无火花会话(monkeypatch):
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    by_uid = {c["uid"]: c
+              for c in dy.parse_fire_streaks(_build_blob_with_bare(), include_all=True)}
+
+    assert set(by_uid) == {"111", "222", "333", "444"}
+    assert by_uid["444"]["status"] == "none"
+    assert by_uid["444"]["days"] == 0
+    # 有火花的那三个分类不能因为开了 include_all 就变
+    assert by_uid["111"]["status"] == "active"
+    assert by_uid["222"]["status"] == "broken"
+    assert by_uid["333"]["status"] == "broken"
+    assert by_uid["111"]["days"] == 5
+
+
+def test_include_all_排序为_active_broken_none(monkeypatch):
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    contacts = dy.parse_fire_streaks(_build_blob_with_bare(), include_all=True)
+    rank = {"active": 0, "broken": 1, "none": 2}
+    order = [rank[c["status"]] for c in contacts]
+    assert order == sorted(order)
+    assert contacts[0]["uid"] == "111"
+    assert contacts[-1]["uid"] == "444"
+
+
+def test_include_all_全裸会话也能出结果(monkeypatch):
+    """一个火花都没有时，老路径早退返回 []；include_all 不能跟着早退。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    blob = b"0:1:999:111" + sep + b"0:1:999:222" + sep
+    assert dy.parse_fire_streaks(blob) == []
+    got = dy.parse_fire_streaks(blob, include_all=True)
+    assert {c["uid"] for c in got} == {"111", "222"}
+    assert all(c["days"] == 0 and c["status"] == "none" for c in got)
+
+
+def test_include_all_不改变无火花会话的窗口隔离(monkeypatch):
+    """开了 include_all 后，裸会话依然不能认领下一个会话的天数。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    sep = b"\x00" * 16
+    blob = (
+        b"0:1:999:111" + sep
+        + b"0:1:999:222" + sep + _consecutive(510) + sep + _chat_data(9999999999) + sep
+    )
+    by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob, include_all=True)}
+    assert by_uid["111"]["days"] == 0
+    assert by_uid["111"]["status"] == "none"
+    assert by_uid["222"]["days"] == 510
+    assert by_uid["222"]["status"] == "active"
+
+
+def test_include_all_每条都带完整字段(monkeypatch):
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    for c in dy.parse_fire_streaks(_build_blob_with_bare(), include_all=True):
+        for k in ("conv_id", "uid", "sec_uid", "days", "nickname",
+                  "avatar", "status", "conversation_short_id", "ticket"):
+            assert k in c, f"{c['uid']} 缺字段 {k}"
+
+
 # ── 窗口越界：没火花的会话偷走别人的天数 ──────────────────
 
 def test_没有火花的会话不会认领下一个会话的天数(monkeypatch):

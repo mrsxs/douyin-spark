@@ -1401,6 +1401,177 @@ def _pb_flat(data: bytes) -> dict:
         else: fields[f] = val
     return fields
 
+
+# ── 历史消息拉取（cmd=301 / get_by_conversation）────────────────────────
+#
+# get_message_by_init 每个会话只回最近 ~21 条，两次同步之间聊得多一点，
+# 中间就是永久空档。cmd=301 带 cursor + limit，能把整个会话翻完。
+#
+# 协议 2026-08-29 从抖音网页版抓包确认：
+#   请求 body 外层和 init_req.bin 同构，只换 cmd(field 1) 和 body(field 8)；
+#   field 8 = { 301: {1:conv_id, 2:conv_type, 3:short_id, 4:direction,
+#                     5:cursor(微秒), 6:limit} }
+#   响应   f6 → f301 = {1:repeated 消息, 2:next_cursor, 3:has_more}
+# 不需要 field 23/24/25（ts_sign/sdk_cert/request_sign）—— 这条路不签名。
+
+HISTORY_URL = "https://imapi.douyin.com/v1/message/get_by_conversation"
+
+# 抖音一页给 50 条左右；要更多只会被截断
+HISTORY_MAX_LIMIT = 100
+
+
+def _pb_replace(raw: bytes, replacements: dict) -> bytes:
+    """逐字段重编码 protobuf，替换指定字段，其余原样保留。
+
+    Why 不用 _pb_flat 再拼回去：那会丢掉 repeated 字段的顺序和重复次数
+    （init_req 里 field 15 就是几十条 repeated header）。这里按线格式
+    顺序走一遍，只动点名的字段，其它字节原封不动搬过去。
+
+    replacements: {field_no: bytes}，值是编码好的完整字段（含 tag）。
+    传 None 表示删除该字段。点名但原文没有的字段会追加到末尾。
+    """
+    out = bytearray()
+    seen = set()
+    pos = 0
+    while pos < len(raw):
+        start = pos
+        try:
+            tag, pos = _read_vi(raw, pos)
+        except IndexError:
+            break
+        f = tag >> 3
+        w = tag & 0x7
+        if w == 0:
+            _, pos = _read_vi(raw, pos)
+        elif w == 2:
+            ln, pos = _read_vi(raw, pos)
+            pos += ln
+        elif w == 5:
+            pos += 4
+        elif w == 1:
+            pos += 8
+        else:
+            break
+        if f in replacements:
+            if f not in seen:          # repeated 的只替换第一次出现，其余丢弃
+                seen.add(f)
+                val = replacements[f]
+                if val:
+                    out += val
+        else:
+            out += raw[start:pos]
+    for f, val in replacements.items():
+        if f not in seen and val:
+            out += val
+    return bytes(out)
+
+
+def build_history_body(init_req_bytes: bytes, conv_id: str,
+                       conv_short_id: int, cursor: int,
+                       limit: int = 50, direction: int = 1) -> bytes:
+    """把 init_req.bin 改造成一条拉历史的请求体。
+
+    外层那堆设备环境字段（device_id / webid / UA / 屏幕尺寸…）是账户自己的，
+    必须原样复用 —— 换成别人的等于串号。所以只动 cmd 和 body 两个字段。
+
+    cursor 是微秒时间戳，传上一页响应里的 next_cursor 就能继续往下翻；
+    首次可以传一个足够早的值（比如 2023-01-01 对应的 1672502400000000）。
+    """
+    parts = conv_id.split(":")
+    conv_type = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 1
+    limit = max(1, min(int(limit), HISTORY_MAX_LIMIT))
+
+    req = (
+        _pb_b(1, conv_id)
+        + _pb_v(2, conv_type)
+        + _pb_v(3, int(conv_short_id or 0))
+        + _pb_v(4, int(direction))
+        + _pb_v(5, int(cursor))
+        + _pb_v(6, limit)
+    )
+    return _pb_replace(init_req_bytes, {
+        1: _pb_v(1, 301),
+        8: _pb_b(8, _pb_b(301, req)),
+    })
+
+
+def parse_history_cursor(resp_bytes: bytes) -> tuple[int, bool]:
+    """从 cmd=301 响应里取 (next_cursor, has_more)。
+
+    任何解析失败都返回 (0, False) —— 当成「没有下一页」。宁可少翻一页，
+    也不能因为抖音改版/异常响应让调用方无限翻下去打接口。
+    """
+    try:
+        inner = _pb_flat(_pb_flat(resp_bytes)[6])[301]
+        if isinstance(inner, list):
+            inner = inner[0]
+        f = _pb_flat(inner)
+        cursor = f.get(2, 0)
+        has_more = f.get(3, 0)
+        if not isinstance(cursor, int) or not isinstance(has_more, int):
+            return 0, False
+        return cursor, bool(has_more)
+    except Exception:
+        return 0, False
+
+
+# 首次回填的起点：2023-01-01（微秒）。抖音的 cursor 是微秒时间戳，
+# 从这里往后翻能覆盖到绝大多数账号的全部聊天史
+HISTORY_EPOCH_CURSOR = 1672502400000000
+
+
+def fetch_history(session: requests.Session, init_req_bytes: bytes,
+                  conv_id: str, conv_short_id: int,
+                  start_cursor: int = HISTORY_EPOCH_CURSOR,
+                  limit: int = 50, max_pages: int = 40,
+                  my_uid: str = "", sleep_between: float = 0.8) -> list[dict]:
+    """把一个会话的历史消息翻完，返回 parse_messages 结构的 list。
+
+    翻页靠响应里的 next_cursor。四道刹车，任何一道触发就停：
+      1. has_more=0        —— 正常翻完
+      2. HTTP 非 200 / 空  —— 接口出问题，别再打
+      3. 本页解析不出消息   —— 多半是抖音改了响应结构
+      4. cursor 不前进      —— 抖音在重复发同一页，再翻就是死循环
+    外加 max_pages 硬上限兜底。
+
+    每页之间 sleep 一下：这是补历史，不是抢时间，别把接口打出风控。
+    """
+    out: list[dict] = []
+    cursor = int(start_cursor)
+    for page in range(max_pages):
+        body = build_history_body(init_req_bytes, conv_id, conv_short_id,
+                                  cursor, limit=limit)
+        try:
+            r = session.post(HISTORY_URL, data=body,
+                             headers={**HEADERS,
+                                      "Content-Type": "application/x-protobuf"},
+                             timeout=15)
+        except Exception as e:
+            _log(f"  [history] 第 {page + 1} 页请求失败: {e}", "ERR")
+            break
+        if getattr(r, "status_code", 0) != 200 or not r.content:
+            _log(f"  [history] 第 {page + 1} 页 HTTP "
+                 f"{getattr(r, 'status_code', '?')}，停止", "ERR")
+            break
+
+        msgs = parse_messages(r.content, my_uid=my_uid)
+        if not msgs:
+            _log(f"  [history] 第 {page + 1} 页没解析出消息，停止", "INFO")
+            break
+        out.extend(msgs)
+
+        next_cursor, has_more = parse_history_cursor(r.content)
+        if not has_more:
+            break
+        if next_cursor <= cursor:
+            _log(f"  [history] cursor 不前进（{cursor} → {next_cursor}），停止", "INFO")
+            break
+        cursor = next_cursor
+        if sleep_between:
+            time.sleep(sleep_between)
+    return out
+
+
 # ── 会话常量 ──────────────────────────────────────────────────────────
 
 def extract_constants(bin_path: str) -> dict:
@@ -1546,7 +1717,16 @@ def load_my_uid_from_cache() -> str:
 
 # ── 火花解析（正则字节匹配，速度快）────────────────────────────────────
 
-def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
+def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dict]:
+    """从 get_message_by_init 响应里解析出联系人 + 火花状态。
+
+    include_all=False（默认）只返回有火花痕迹的会话，行为与历史一致 ——
+    老调用方和「升级后火花人数不能变」这条底线都靠这个默认值兜着。
+
+    include_all=True 时，连一条火花标记都没有的会话也会带出来，
+    记 days=0 / status="none"。用户要「不管有没有火花都能选」，
+    那些人只能从这条路进联系人列表。
+    """
     # 找所有 conv_id — 支持 0:1:（私聊）和 0:2:（可能含重燃/群）
     conv_positions: list[tuple[int, str]] = [
         (m.start(), m.group().decode())
@@ -1605,7 +1785,7 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
     n_convs = max(len(all_uid_ctr) // 2, 1)
     my_sec_uids = {su for su, f in sec_uid_freq.items() if f >= max(3, n_convs // 2)}
 
-    if not streak_entries:
+    if not streak_entries and not include_all:
         return []
 
     result = []
@@ -1653,6 +1833,7 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
         # 状态分类：
         #   active —— 火花仍在燃烧，正常续即可（有 consecutive_chat 且未过期）
         #   broken —— 火花已断，抖音 web 显示「续火花」按钮，需主动重燃
+        #   none   —— 一条火花标记都没有（普通好友），仅 include_all 时产出
         if match:
             days, marker = match
             # consecutive_chat_data.expire_time 是火花过期 unix 秒；< 当前时间 → 已断
@@ -1670,10 +1851,13 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             _rekindled = next(((d, mk) for p, d, mk in streak_entries
                                if conv_pos < p < conv_end), None)
             if not _rekindled:
-                continue
-            days, marker = _rekindled
-            status = "broken"
-            _log(f"  [parse] uid={uid}: 仅有 {marker}={days}天 → 需重燃", "PARSE")
+                if not include_all:
+                    continue
+                days, status = 0, "none"
+            else:
+                days, marker = _rekindled
+                status = "broken"
+                _log(f"  [parse] uid={uid}: 仅有 {marker}={days}天 → 需重燃", "PARSE")
 
         sec_uid  = _find_sec_uid_for_uid(resp_bytes, uid, my_sec_uids)
         nickname = _find_nickname_by_sec_uid(resp_bytes, sec_uid)
@@ -1692,8 +1876,9 @@ def parse_fire_streaks(resp_bytes: bytes) -> list[dict]:
             "ticket": ticket,
         })
 
-    # active 在前、broken 在后，各自按天数倒序
-    return sorted(result, key=lambda x: (x["status"] != "active", -x["days"]))
+    # active → broken → none，各自按天数倒序
+    _rank = {"active": 0, "broken": 1, "none": 2}
+    return sorted(result, key=lambda x: (_rank.get(x["status"], 1), -x["days"]))
 
 
 # ── 聊天消息解析 ──────────────────────────────────────────────────────

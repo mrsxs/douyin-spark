@@ -17,6 +17,10 @@ import douyin_im as dy
 
 from .models import Contact
 
+# 联系人展示/排序优先级：还在烧的 → 断了要重燃的 → 从来没火花的
+# 未知状态按 broken 处理（宁可让用户多看一眼，也别悄悄排到最后）
+STATUS_RANK = {"active": 0, "broken": 1, "none": 2}
+
 
 def normalize_avatar_url(url: str | None) -> str:
     """把抖音头像 URL 规范化成长期可访问的形式。
@@ -56,8 +60,21 @@ def upsert_cache(db: Session, account_id: int, contacts: list[dict],
         elif not row.nickname:
             row.nickname = new_nick or uid
         row.conv_id = c.get("conv_id") or row.conv_id
-        row.days = c.get("days") if c.get("days") is not None else row.days
-        row.status = c.get("status") or "active"
+        # 某次解析没带出 short_id 时别抹掉已存的 —— 抹了这条会话就再也拉不了历史
+        _short = c.get("conversation_short_id")
+        if _short:
+            row.conv_short_id = int(_short)
+        new_status = c.get("status") or "active"
+        # 「本次没解析出火花」不等于「这人真的没火花」——
+        # parse_fire_streaks 是拿正则打 protobuf，窗口偏一点就漏掉 consecutive_chat。
+        # 真让它覆盖下去，用户看到的是 342 天一夜变 0 天。所以 none 只能新增，
+        # 不能把库里已经烧起来（或烧断过）的记录降级。
+        downgrade = (new_status == "none"
+                     and row.status in ("active", "broken")
+                     and (row.days or 0) > 0)
+        if not downgrade:
+            row.days = c.get("days") if c.get("days") is not None else row.days
+            row.status = new_status
         # 刷新时偶尔拿不到头像，别把已有的抹掉
         if c.get("avatar"):
             row.avatar = normalize_avatar_url(c["avatar"])
@@ -76,7 +93,8 @@ def upsert_cache(db: Session, account_id: int, contacts: list[dict],
 def load_cached(db: Session, account_id: int) -> list[dict]:
     """读冷备，返回和 trigger.get_contacts 同结构的 dict 列表。
 
-    排序与抖音接口一致：还在燃烧的排前面，再按天数倒序。
+    排序与抖音接口一致：还在燃烧的排前面，然后是需重燃的，
+    最后才是从来没有火花的普通好友；同组内按天数倒序。
     """
     rows = (db.query(Contact)
               .filter(Contact.douyin_account_id == account_id)
@@ -86,11 +104,12 @@ def load_cached(db: Session, account_id: int) -> list[dict]:
         "nickname": r.remark or r.nickname or r.uid,
         "avatar": r.avatar or "",
         "conv_id": r.conv_id or "",
+        "conversation_short_id": r.conv_short_id or 0,
         "days": r.days or 0,
         "status": r.status or "active",
         "remark": r.remark or "",
     } for r in rows]
-    out.sort(key=lambda c: (c["status"] != "active", -(c["days"] or 0)))
+    out.sort(key=lambda c: (STATUS_RANK.get(c["status"], 1), -(c["days"] or 0)))
     return out
 
 

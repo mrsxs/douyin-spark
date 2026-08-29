@@ -83,6 +83,12 @@ class Schedule(Base):
     douyin_account_id: Mapped[int]   = mapped_column(ForeignKey("douyin_accounts.id", ondelete="CASCADE"), unique=True)
     enabled:           Mapped[bool]  = mapped_column(Boolean, default=False)
     time_hhmm:         Mapped[str]   = mapped_column(String(5), default="09:00")
+    # 火花已断(broken)的人：默认发。断了的火花直接发消息就能续上，
+    # 跳过他们等于白白少续一批人。
+    send_to_broken:    Mapped[bool]  = mapped_column(Boolean, default=True)
+    # 从来没有火花(none)的普通好友：默认不发。那是主动去搭讪没在互动的人，
+    # 风控面和用户预期都和「续火花」不是一回事，必须显式打开。
+    send_to_no_spark:  Mapped[bool]  = mapped_column(Boolean, default=False)
     last_ran_date:     Mapped[str | None] = mapped_column(String(10), nullable=True)
     last_result:       Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -184,6 +190,9 @@ class Contact(Base):
     remark:            Mapped[str | None] = mapped_column(String(80), nullable=True)
     avatar:            Mapped[str | None] = mapped_column(String(512), nullable=True)
     conv_id:           Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # 拉历史消息（imapi cmd=301）必须带的会话数字 id。
+    # parse_fire_streaks 本来就解析得出，存下来省得每次重打 1.5MB 的 init 去要。
+    conv_short_id:     Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     days:              Mapped[int | None] = mapped_column(Integer, nullable=True)
     # "active"（火花还在燃烧）| "broken"（已断，需去 App 重燃）
     status:            Mapped[str]     = mapped_column(String(16), default="active")
