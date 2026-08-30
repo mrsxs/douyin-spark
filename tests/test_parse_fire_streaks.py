@@ -208,3 +208,134 @@ def test_过期判定也不会串到下一个会话(monkeypatch):
     by_uid = {c["uid"]: c for c in dy.parse_fire_streaks(blob)}
     assert by_uid["111"]["status"] == "active"   # 不该被 BBB 的过期时间影响
     assert by_uid["222"]["status"] == "broken"
+
+
+# ── 重燃中（recovering）───────────────────────────────────────────
+
+def _chat_data_full(expire_ts: int, flames: list) -> bytes:
+    """带 flame_infos 的 consecutive_chat_data。
+
+    真实结构（2026-08-30 抓包）：flame_infos 是按时间分段的数组，
+    只有 start<=now<=end 那一段代表「现在」。
+    """
+    import json as _json
+    blob = _json.dumps({"expire_time": expire_ts, "can_recover_days": 3,
+                        "flame_infos": flames}, ensure_ascii=False).encode()
+    out = b"a:consecutive_chat_data\x12"
+    n = len(blob)
+    while n > 0x7F:                       # varint 长度
+        out += bytes([(n & 0x7F) | 0x80]); n >>= 7
+    return out + bytes([n]) + blob
+
+
+def _flame(text, start, end, days=100, level="normal|normal", state=1, rec=None):
+    f = {"days": days, "start": start, "end": end, "level": level,
+         "text": text, "state": state, "simplify_text": text, "real_days": days}
+    if rec:
+        f["recover_days"], f["recover_need_days"] = rec
+    return f
+
+
+def _recovering_blob(uid=b"111", days=84, rec=(1, 3), level="recover_normal|normal"):
+    import time as _t
+    now = int(_t.time())
+    sep = b"\x00" * 16
+    return (
+        b"0:1:999:" + uid + sep + _consecutive(days) + sep
+        + _chat_data_full(now + 86400, [
+            _flame("重燃中 %d/%d" % rec, now - 3600, now + 3600,
+                   days=days, level=level, state=3, rec=rec),
+            _flame("3 天后消失", now + 3600, now + 90000, days=days,
+                   level="to_recover|normal", state=3, rec=rec),
+        ]) + sep
+    )
+
+
+def test_recovering_is_its_own_status(monkeypatch):
+    """核心：「重燃中」不是普通 active。真实账号里 84/105/543 天三个人
+    都在重燃窗口期，之前全被当成正常在烧的，用户看不出他们快没了。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    got = {c["uid"]: c for c in dy.parse_fire_streaks(_recovering_blob())}
+    assert got["111"]["status"] == "recovering"
+    assert got["111"]["days"] == 84
+
+
+def test_recovering_carries_progress(monkeypatch):
+    """要带上 1/3 这个进度 —— 用户得知道还差几天才能救回来。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    c = dy.parse_fire_streaks(_recovering_blob(rec=(2, 3)))[0]
+    assert c["recover_days"] == 2
+    assert c["recover_need_days"] == 3
+
+
+def test_recovering_detected_by_text_not_level(monkeypatch):
+    """真实数据里当前时段的 level 可能是 gray|normal（会话[10]就是），
+    只认 level 会漏。判定要看 text 里的「重燃」。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    got = dy.parse_fire_streaks(_recovering_blob(level="gray|normal"))
+    assert got[0]["status"] == "recovering"
+
+
+def test_only_current_window_counts(monkeypatch):
+    """flame_infos 里未来那些「N 天后消失」的段不能让人变成重燃中 ——
+    正常在烧的会话也带着这些预告段。"""
+    import time as _t
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    now = int(_t.time())
+    sep = b"\x00" * 16
+    blob = (b"0:1:999:222" + sep + _consecutive(717) + sep
+            + _chat_data_full(now + 86400, [
+                _flame("717", now - 3600, now + 3600, days=717),
+                _flame("6 天后消失", now + 90000, now + 176400, days=717,
+                       level="to_recover|normal", state=3, rec=(1, 3)),
+            ]) + sep)
+    got = dy.parse_fire_streaks(blob)
+    assert got[0]["status"] == "active", "正常在烧的被误判成重燃中"
+
+
+def test_recovering_sorts_before_broken(monkeypatch):
+    """排序：在烧 → 重燃中 → 已断 → 无火花。
+    重燃中要靠前，它们是有窗口期、还救得回来的。"""
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    blob = _build_blob() + _recovering_blob(uid=b"777")
+    order = [c["status"] for c in dy.parse_fire_streaks(blob, include_all=True)]
+    rank = {"active": 0, "recovering": 1, "broken": 2, "none": 3}
+    assert [rank[s] for s in order] == sorted(rank[s] for s in order)
+
+
+def test_待重燃_不是_重燃中(monkeypatch):
+    """真实数据里有 text="6 天后消失" / simplify_text="待重燃" 的段 ——
+    那是「快没了，还没开始重燃」，不是「正在重燃中」。
+
+    踩到过：把 text+simplify_text 拼起来做子串匹配，「待重燃」命中了
+    「重燃」，143 天的松间听雨被误判成重燃中。
+    """
+    import time as _t
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    now = int(_t.time())
+    sep = b"\x00" * 16
+    f = _flame("6 天后消失", now - 3600, now + 3600, days=143,
+               level="to_recover|normal", state=3, rec=(1, 3))
+    f["simplify_text"] = "待重燃"
+    blob = (b"0:1:999:143" + sep + _consecutive(143) + sep
+            + _chat_data_full(now + 86400, [f]) + sep)
+    got = dy.parse_fire_streaks(blob)
+    assert got[0]["status"] == "active", "「待重燃」被当成了「重燃中」"
+
+
+def test_进度取自_text_而不是_rec_字段(monkeypatch):
+    """抖音的 recover_days/recover_need_days 和 text 会不一致：
+    真实数据里 rec=2/2 而 text="重燃中 1/3"。text 才是给用户看的那个。
+    """
+    import time as _t
+    monkeypatch.setattr(dy, "_log", lambda *a, **k: None)
+    now = int(_t.time())
+    sep = b"\x00" * 16
+    f = _flame("重燃中 1/3", now - 3600, now + 3600, days=105,
+               level="gray|normal", state=3, rec=(2, 2))   # rec 故意和 text 不一致
+    blob = (b"0:1:999:105" + sep + _consecutive(105) + sep
+            + _chat_data_full(now + 86400, [f]) + sep)
+    c = dy.parse_fire_streaks(blob)[0]
+    assert c["status"] == "recovering"
+    assert (c["recover_days"], c["recover_need_days"]) == (1, 3), \
+        f'进度该取 text 里的 1/3，实际取到 {c["recover_days"]}/{c["recover_need_days"]}'

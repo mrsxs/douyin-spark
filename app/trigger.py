@@ -101,11 +101,14 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
     if not session or not dy._check_login(session):
         raise NotReady("cookies 无效")
     constants = dy.extract_constants(str(dy.INIT_REQ_BIN))
+    # 给 init 请求加会话数上限：不加的话抖音只回 ~25 个会话就截断，
+    # 长期没互动的老火花（906 天那种）根本进不来。见 dy.INIT_CONV_LIMIT。
+    # 响应会从 ~2.5MB 涨到 ~4.7MB，多花 1 秒左右，换完整列表值得。
     resp = session.post(
         "https://imapi.douyin.com/v1/message/get_message_by_init",
-        data=open(str(dy.INIT_REQ_BIN), "rb").read(),
+        data=dy.build_init_body(open(str(dy.INIT_REQ_BIN), "rb").read()),
         headers={**dy.HEADERS, "Content-Type": "application/x-protobuf"},
-        timeout=15,
+        timeout=30,
     )
     if resp.status_code != 200 or len(resp.content) < 1024:
         raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
@@ -576,17 +579,19 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
             templates = {}
 
     sent = skipped = failed = 0
-    # 谁进发送集合，由两个账户级开关决定：
-    #   active   —— 火花在烧，永远发
-    #   broken   —— 火花断了，直接发消息就能续上 → send_to_broken，默认开
-    #   none     —— 从来没火花的普通好友，属于主动搭讪 → send_to_no_spark，默认关
+    # 谁进发送集合：
+    #   recovering —— 断过、正在重燃窗口期内。**永远发，不受开关管**：
+    #                 窗口内没连够天数，原来那几百天就真没了，这是最急的一类
+    #   active     —— 火花在烧，永远发
+    #   broken     —— 火花断了，直接发消息就能续上 → send_to_broken，默认开
+    #   none       —— 从来没火花的普通好友，属于主动搭讪 → send_to_no_spark，默认关
     with SessionLocal() as db:
         sch = db.query(Schedule).filter(
             Schedule.douyin_account_id == account_id).first()
         to_broken = bool(sch.send_to_broken) if sch else True
         to_no_spark = bool(sch.send_to_no_spark) if sch else False
 
-    allowed = {"active"}
+    allowed = {"active", "recovering"}
     if to_broken:
         allowed.add("broken")
     if to_no_spark:
@@ -598,6 +603,11 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
         dy._log(f"[auto] 跳过 {len(excluded)} 个联系人"
                 f"（send_to_broken={to_broken}, send_to_no_spark={to_no_spark}）", "INFO")
     contacts = [c for c in contacts if c.get("status", "active") in allowed]
+    # 重燃中的排最前面发：任务被熔断/限速中断时，先保住最急的那批
+    contacts.sort(key=lambda c: 0 if c.get("status") == "recovering" else 1)
+    _n_rec = sum(1 for c in contacts if c.get("status") == "recovering")
+    if _n_rec:
+        dy._log(f"[auto] {_n_rec} 个重燃中的联系人排在最前发送", "INFO")
     # 回填进度分母：启动时还不知道要发几个（得先调抖音 API），
     # 前端在 total==0 期间显示「准备中」，拿到这里的值后才有百分比。
     try:

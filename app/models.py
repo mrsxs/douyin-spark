@@ -194,8 +194,13 @@ class Contact(Base):
     # parse_fire_streaks 本来就解析得出，存下来省得每次重打 1.5MB 的 init 去要。
     conv_short_id:     Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     days:              Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # "active"（火花还在燃烧）| "broken"（已断，需去 App 重燃）
+    # active（还在烧）| recovering（断过、正在重燃窗口期内）
+    # | broken（已断）| none（从来没火花的普通好友）
     status:            Mapped[str]     = mapped_column(String(16), default="active")
+    # 重燃进度「N/M」：已连上 N 天、需要 M 天才能把 days 那个数救回来。
+    # 非 recovering 时都是 0。取自 flame_infos 当前段的 text「重燃中 N/M」
+    recover_days:      Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recover_need_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tags:              Mapped[str | None] = mapped_column(String(200), nullable=True)  # 逗号分隔
     last_synced_at:    Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

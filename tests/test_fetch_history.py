@@ -217,3 +217,58 @@ def test_empty_page_stops(monkeypatch):
     s = _FakeSession([_page(0, 200, 1), _page(1, 300, 1)])
     _fetch(s, start_cursor=100)
     assert s.calls == 1
+
+
+# ── init 请求的会话数上限（cmd=2043 field 3）────────────────────────
+
+def _init_req_bytes() -> bytes:
+    """仿真实 init_req.bin：外层环境字段 + field8={2043:{field2:0}}。"""
+    return (
+        dy._pb_v(1, 2043)
+        + dy._pb_v(2, 10001)
+        + dy._pb_b(3, "0.1.8")
+        + dy._pb_b(8, dy._pb_b(2043, dy._pb_v(2, 0)))
+        + dy._pb_b(11, "douyin_pc")
+        + dy._pb_b(15, dy._pb_b(1, "session_aid") + dy._pb_b(2, "6383"))
+        + dy._pb_b(21, "douyin_web")
+    )
+
+
+def _init_body_fields(limit=None):
+    raw = (dy.build_init_body(_init_req_bytes(), limit=limit)
+           if limit is not None else dy.build_init_body(_init_req_bytes()))
+    return dy._pb_flat(raw), dy._pb_flat(dy._pb_flat(dy._pb_flat(raw)[8])[2043])
+
+
+def test_init_body_sets_conversation_limit():
+    """核心：不传 field 3 时抖音只回 ~25 个会话，2.47MB 就截断了 ——
+    真实账号 37 个会话里，「王女士 906 天」「顺风吖 905 天」被截在外面。
+    传 200 就能拿全（实测 200 和 500 结果一致）。
+    """
+    top, body = _init_body_fields()
+    assert body[3] == dy.INIT_CONV_LIMIT
+    assert body[2] == 0, "全量标志被弄丢了"
+
+
+def test_init_body_keeps_cmd_2043():
+    top, _ = _init_body_fields()
+    assert top[1] == 2043
+
+
+def test_init_body_preserves_environment():
+    """外层是账户自己的设备环境，必须原样保留 —— 换成别人的等于串号。"""
+    top, _ = _init_body_fields()
+    assert top[3] == b"0.1.8"
+    assert top[11] == b"douyin_pc"
+    assert top[21] == b"douyin_web"
+
+
+def test_init_body_custom_limit():
+    _, body = _init_body_fields(limit=50)
+    assert body[3] == 50
+
+
+def test_init_body_replaces_not_appends():
+    """field 8 要整个换掉，留着旧的会变成 repeated。"""
+    top, _ = _init_body_fields()
+    assert not isinstance(top[8], list)

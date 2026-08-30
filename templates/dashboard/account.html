@@ -203,6 +203,7 @@
   <div class="ios-seg">
     <button @click="setFilter('all')"    class="ios-seg-item" :class="filter==='all' ? 'on' : ''">全部 <span class="ml-0.5 text-ios-label3" x-show="filter!=='all'">{{ filtered_total }}</span></button>
     <button @click="setFilter('active')" class="ios-seg-item" :class="filter==='active' ? 'on' : ''">续火花 <span class="ml-0.5 text-ios-label3" x-show="filter!=='active'">{{ active_total }}</span></button>
+    <button @click="setFilter('recovering')" class="ios-seg-item" :class="filter==='recovering' ? 'on' : ''">重燃中 <span class="ml-0.5 text-ios-label3" x-show="filter!=='recovering'">{{ recovering_total }}</span></button>
     <button @click="setFilter('broken')" class="ios-seg-item" :class="filter==='broken' ? 'on' : ''">已断 <span class="ml-0.5 text-ios-label3" x-show="filter!=='broken'">{{ broken_total }}</span></button>
     <button @click="setFilter('none')"   class="ios-seg-item" :class="filter==='none' ? 'on' : ''">无火花 <span class="ml-0.5 text-ios-label3" x-show="filter!=='none'">{{ none_total }}</span></button>
   </div>
@@ -257,9 +258,10 @@
   {% set name = c['nickname'] or uid %}
   {% set days = c['days'] %}
   {# 三态：active(还在烧) / broken(断了要去 App 重燃) / none(从来没火花的普通好友) #}
-  {% set spark = c['status'] if c['status'] in ('active', 'broken', 'none') else 'broken' %}
+  {% set spark = c['status'] if c['status'] in ('active', 'recovering', 'broken', 'none') else 'broken' %}
   {% set broken = (spark == 'broken') %}
   {% set no_spark = (spark == 'none') %}
+  {% set recovering = (spark == 'recovering') %}
   <div data-uid="{{ uid }}"
        data-name="{{ name|e }}"
        data-days="{{ days }}"
@@ -268,7 +270,7 @@
        data-broken="{{ '1' if broken else '0' }}"
        x-data="{ enabled: {{ 'true' if tpl.enabled else 'false' }} }"
        x-show="filter==='all' || filter==='{{ spark }}'"
-       class="contact-card apple-card-solid p-4 transition hover:shadow-apple-lg flex flex-col gap-3 relative overflow-hidden{% if broken %} border-rose-200 dark:border-rose-800/60{% endif %}">
+       class="contact-card apple-card-solid p-4 transition hover:shadow-apple-lg flex flex-col gap-3 relative overflow-hidden{% if broken %} border-rose-200 dark:border-rose-800/60{% elif recovering %} border-amber-300 dark:border-amber-700/60{% endif %}">
 
     <!-- R1: 勾选 + 头像 + 名字 + iOS toggle -->
     <div class="flex items-start gap-3">
@@ -303,19 +305,27 @@
 
     <!-- Panel: 橙色火花大数字 + 状态徽章（无火花的人不给大数字，0 天没意义） -->
     <div class="flex items-center justify-between px-3 py-2.5 rounded-xl
-                {% if broken %}bg-ios-redBg/60{% elif no_spark %}bg-ios-fill2 dark:bg-slate-700/40{% else %}bg-ios-tintBg/70{% endif %}">
+                {% if broken %}bg-ios-redBg/60{% elif no_spark %}bg-ios-fill2 dark:bg-slate-700/40{% elif recovering %}bg-amber-50 dark:bg-amber-900/20{% else %}bg-ios-tintBg/70{% endif %}">
       <div class="flex items-center gap-1.5">
         {% if no_spark %}
           <iconify-icon icon="lucide:flame-off" width="20" height="20" class="text-ios-label3"></iconify-icon>
           <span class="text-sm font-medium text-ios-label3">还没有火花</span>
         {% else %}
-          <iconify-icon icon="lucide:{{ 'flame-kindling' if broken else 'flame' }}" width="22" height="22"
-                        class="{% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}"></iconify-icon>
-          <span class="text-2xl font-extrabold leading-none {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}">{{ days }}</span>
-          <span class="text-xs font-medium {% if broken %}text-ios-red{% else %}text-ios-tint{% endif %}/80">天</span>
+          <iconify-icon icon="lucide:{{ 'flame-kindling' if broken or recovering else 'flame' }}" width="22" height="22"
+                        class="{% if broken %}text-ios-red{% elif recovering %}text-amber-600{% else %}text-ios-tint{% endif %}"></iconify-icon>
+          <span class="text-2xl font-extrabold leading-none {% if broken %}text-ios-red{% elif recovering %}text-amber-600{% else %}text-ios-tint{% endif %}">{{ days }}</span>
+          <span class="text-xs font-medium {% if broken %}text-ios-red{% elif recovering %}text-amber-600{% else %}text-ios-tint{% endif %}/80">天</span>
         {% endif %}
       </div>
-      {% if broken %}
+      {% if recovering %}
+        {# 重燃中：断过但还在恢复窗口内。N/M = 已连上几天 / 还需几天才能把上面那个天数救回来 #}
+        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold
+                     bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+              title="连续聊满 {{ c.get('recover_need_days') or 0 }} 天就能恢复 {{ days }} 天火花">
+          <iconify-icon icon="lucide:flame-kindling" width="11" height="11"></iconify-icon>
+          重燃中 {{ c.get('recover_days') or 0 }}/{{ c.get('recover_need_days') or 0 }}
+        </span>
+      {% elif broken %}
         <span class="apple-chip-red">
           <iconify-icon icon="lucide:flame-kindling" width="11" height="11"></iconify-icon>
           火花已断

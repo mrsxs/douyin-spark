@@ -76,6 +76,9 @@ def init_db():
         ("schedules", "send_to_no_spark", "BOOLEAN DEFAULT 0"),
         # 拉历史消息（cmd=301）要带的会话数字 id
         ("contacts", "conv_short_id", "BIGINT"),
+        # 重燃中的进度 N/M
+        ("contacts", "recover_days", "INTEGER"),
+        ("contacts", "recover_need_days", "INTEGER"),
     ]
     with engine.begin() as conn:
         for sql in ddl:

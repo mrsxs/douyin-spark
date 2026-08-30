@@ -8,7 +8,7 @@ Why: /accounts/{id} 原本在请求里同步调 trigger.get_contacts()（走抖�
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,9 +17,15 @@ import douyin_im as dy
 
 from .models import Contact
 
-# 联系人展示/排序优先级：还在烧的 → 断了要重燃的 → 从来没火花的
+# 联系人展示/排序优先级：
+#   还在烧 → 重燃中（有窗口期、最紧急）→ 已断 → 从来没火花
 # 未知状态按 broken 处理（宁可让用户多看一眼，也别悄悄排到最后）
-STATUS_RANK = {"active": 0, "broken": 1, "none": 2}
+STATUS_RANK = {"active": 0, "recovering": 1, "broken": 2, "none": 3}
+
+# prune 宽限期：连续这么多天没被 init 同步到，才认为好友真的没了。
+# get_message_by_init 只回最近活跃的会话，不是完整好友列表 ——
+# 火花越久的人越容易长期没互动，"这次没回就删"会专挑最珍贵的下手。
+PRUNE_GRACE_DAYS = 7
 
 
 def normalize_avatar_url(url: str | None) -> str:
@@ -35,8 +41,8 @@ def upsert_cache(db: Session, account_id: int, contacts: list[dict],
                  prune: bool = False) -> int:
     """把抓到的联系人写入冷备表。返回写入条数。不 commit，由调用方决定事务边界。
 
-    prune=True 时删除本次没出现的联系人 —— 仅在拿到「完整列表」时才可以开，
-    部分刷新时开会误删。空列表一律不清理（接口异常返回空不该清空用户数据）。
+    prune=True 时清理「已经很久没被同步到」的联系人。空列表一律不清理
+    （接口异常返回空不该清空用户数据）。
     """
     existing = {c.uid: c for c in db.query(Contact).filter(
         Contact.douyin_account_id == account_id).all()}
@@ -75,6 +81,10 @@ def upsert_cache(db: Session, account_id: int, contacts: list[dict],
         if not downgrade:
             row.days = c.get("days") if c.get("days") is not None else row.days
             row.status = new_status
+            # 进度跟着状态走：重燃成功回到 active 时要清零，
+            # 否则界面上留个「2/3」的残影
+            row.recover_days = int(c.get("recover_days") or 0)
+            row.recover_need_days = int(c.get("recover_need_days") or 0)
         # 刷新时偶尔拿不到头像，别把已有的抹掉
         if c.get("avatar"):
             row.avatar = normalize_avatar_url(c["avatar"])
@@ -83,9 +93,20 @@ def upsert_cache(db: Session, account_id: int, contacts: list[dict],
 
     if prune and seen:
         # 抖音那边已经没有的（对方删好友/注销），本地也要清掉，
-        # 否则用户会一直看到早已消失的人挂在列表里
+        # 否则用户会一直看到早已消失的人挂在列表里。
+        #
+        # 但不能「这次没回就删」—— get_message_by_init 只回最近活跃的会话，
+        # 不是完整好友列表。真实事故：账号 3 的「王女士 906 天」「顺风吖 905 天」
+        # 「团团 327 天」最近没互动、掉出 init 返回范围，一次刷新就被删光了。
+        # 火花越久的人越容易长期没互动，恰恰是最不该删的那批。
+        #
+        # 改成宽限期：连续 PRUNE_GRACE_DAYS 天都没被同步到才算真没了。
+        cutoff = now - timedelta(days=PRUNE_GRACE_DAYS)
         for uid, row in existing.items():
-            if uid not in seen:
+            if uid in seen:
+                continue
+            last = row.last_synced_at
+            if last is None or last < cutoff:
                 db.delete(row)
     return n
 
@@ -107,6 +128,8 @@ def load_cached(db: Session, account_id: int) -> list[dict]:
         "conversation_short_id": r.conv_short_id or 0,
         "days": r.days or 0,
         "status": r.status or "active",
+        "recover_days": r.recover_days or 0,
+        "recover_need_days": r.recover_need_days or 0,
         "remark": r.remark or "",
     } for r in rows]
     out.sort(key=lambda c: (STATUS_RANK.get(c["status"], 1), -(c["days"] or 0)))

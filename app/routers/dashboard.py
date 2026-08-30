@@ -232,7 +232,9 @@ def account_page(
     # none = 从来没有火花的普通好友（include_all 解析出来的）；
     # 和 broken 分开计数，段控要分四段，红色横幅也只该为 broken 报警
     none_total = sum(1 for c in contacts if c.get("status") == "none")
-    broken_total = filtered_total - active_total - none_total
+    # 重燃中：断过但还在恢复窗口内，最紧急 —— 窗口过了原来那几百天就没了
+    recovering_total = sum(1 for c in contacts if c.get("status") == "recovering")
+    broken_total = filtered_total - active_total - none_total - recovering_total
     per_page = 30
     total_pages = max(1, (filtered_total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
@@ -259,6 +261,7 @@ def account_page(
         "full_total": full_total, "filtered_total": filtered_total,
         "active_total": active_total, "broken_total": broken_total,
         "none_total": none_total,
+        "recovering_total": recovering_total,
         "per_page": per_page,
         "now": datetime.now(),
     })

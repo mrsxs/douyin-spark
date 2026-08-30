@@ -1414,6 +1414,33 @@ def _pb_flat(data: bytes) -> dict:
 #   响应   f6 → f301 = {1:repeated 消息, 2:next_cursor, 3:has_more}
 # 不需要 field 23/24/25（ts_sign/sdk_cert/request_sign）—— 这条路不签名。
 
+# 「重燃中 N/M」——抖音在 flame_infos[].text 里给的重燃进度。
+# 必须精确匹配这个前缀：simplify_text 里还有个「待重燃」，那是没开始重燃的
+_RECOVER_PAT = re.compile(r"重燃中\s*(\d+)\s*/\s*(\d+)")
+
+# init(cmd=2043) 请求体里的会话数上限（field 3）。
+#
+# 抖音网页版根本不传这个字段，走服务端默认值 —— 实测只回 ~25 个会话、
+# 2.47MB 就截断了。真实账号有 37 个会话，「王女士 906 天」「顺风吖 905 天」
+# 被截在外面，联系人列表里根本看不到，prune 还会顺手把它们删掉。
+# 火花越久的人越容易长期没互动、排得越靠后，这个默认值专挑最珍贵的下手。
+#
+# 传 200 拿全（实测 200 和 500 结果一致，都是 37 个，4.74MB / 2.4s）。
+INIT_CONV_LIMIT = 200
+
+
+def build_init_body(init_req_bytes: bytes,
+                    limit: int = INIT_CONV_LIMIT) -> bytes:
+    """给 init_req.bin 加上会话数上限，其余字段原样复用。
+
+    外层那堆设备环境字段是账户自己的（device_id / webid / UA…），
+    必须原样保留 —— 换成别人的等于串号。所以只重写 field 8 里的请求体。
+    field 2=0 是「全量拉取」标志，得留着。
+    """
+    inner = _pb_v(2, 0) + _pb_v(3, max(1, int(limit)))
+    return _pb_replace(init_req_bytes, {8: _pb_b(8, _pb_b(2043, inner))})
+
+
 HISTORY_URL = "https://imapi.douyin.com/v1/message/get_by_conversation"
 
 # 抖音一页给 50 条左右；要更多只会被截断
@@ -1761,8 +1788,13 @@ def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dic
 
     # 找每个会话的 consecutive_chat_data JSON（含 expire_time / can_recover_days / flame_infos）
     # 形如：a:consecutive_chat_data\x12<varint-len><json>
-    # 用 expire_time 判断火花是否还在燃烧；过期的不该被识别为「续火花」目标
-    chat_data_entries: list[tuple[int, int]] = []  # (pos, expire_time)
+    # 用 expire_time 判断火花是否还在燃烧；过期的不该被识别为「续火花」目标。
+    #
+    # flame_infos 是按时间分段的数组，只有 start<=now<=end 那一段代表「现在」。
+    # 当前段的 text 带「重燃中 N/M」时，说明火花断过、正在恢复窗口期内 ——
+    # 这类人最紧急（窗口过了就真丢了原来的天数），得单独标出来。
+    chat_data_entries: list[tuple[int, int]] = []      # (pos, expire_time)
+    recover_entries: list[tuple[int, int, int]] = []   # (pos, recover_days, need_days)
     _now_ts = int(time.time())
     for m in re.finditer(rb'a:consecutive_chat_data\x12', resp_bytes):
         # 读 varint length
@@ -1774,6 +1806,25 @@ def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dic
             exp = int(obj.get('expire_time') or 0)
             if exp:
                 chat_data_entries.append((m.start(), exp))
+            # 只认当前时间落在 [start, end) 里的那一段
+            cur = next((f for f in (obj.get('flame_infos') or [])
+                        if int(f.get('start') or 0) <= _now_ts <= int(f.get('end') or 0)),
+                       None)
+            if cur:
+                # 判定看 text 不看 level：真实数据里当前段的 level 可能已经
+                # 变成 gray|normal（隔天那一段），但 text 仍是「重燃中 1/3」。
+                #
+                # 必须精确匹配「重燃中 N/M」，不能拿「重燃」做子串 ——
+                # simplify_text 里有「待重燃」（text="6 天后消失"），那是
+                # 「快没了、还没开始重燃」，两回事。踩过：143 天的会话被误判。
+                #
+                # 进度取 text 里的数字，不取 recover_days/recover_need_days ——
+                # 抖音这两处会不一致（真实数据 rec=2/2 而 text="重燃中 1/3"），
+                # text 才是它自己显示给用户的那个。
+                _rm = _RECOVER_PAT.search(str(cur.get('text') or ''))
+                if _rm:
+                    recover_entries.append(
+                        (m.start(), int(_rm.group(1)), int(_rm.group(2))))
         except Exception:
             pass
 
@@ -1831,9 +1882,12 @@ def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dic
             None,
         )
         # 状态分类：
-        #   active —— 火花仍在燃烧，正常续即可（有 consecutive_chat 且未过期）
-        #   broken —— 火花已断，抖音 web 显示「续火花」按钮，需主动重燃
-        #   none   —— 一条火花标记都没有（普通好友），仅 include_all 时产出
+        #   active     —— 火花仍在燃烧，正常续即可（有 consecutive_chat 且未过期）
+        #   recovering —— 火花断过、正在重燃窗口期内（flame_infos 当前段写着「重燃中 N/M」）
+        #   broken     —— 火花已断，抖音 web 显示「续火花」按钮，需主动重燃
+        #   none       —— 一条火花标记都没有（普通好友），仅 include_all 时产出
+        recover = next(((rd, nd) for p, rd, nd in recover_entries
+                        if conv_pos < p < conv_end), None)
         if match:
             days, marker = match
             # consecutive_chat_data.expire_time 是火花过期 unix 秒；< 当前时间 → 已断
@@ -1844,6 +1898,12 @@ def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dic
                 from datetime import datetime as _dt
                 _log(f"  [parse] uid={uid}: expire_time={exp_ts}"
                      f" ({_dt.fromtimestamp(exp_ts):%Y-%m-%d %H:%M}) 已过期 → 需重燃", "PARSE")
+            elif recover:
+                # 还没过期但当前段标着「重燃中」：断过一次，正在恢复中。
+                # 这类最紧急 —— 窗口内没连够天数，原来那 N 百天就真没了。
+                status = "recovering"
+                _log(f"  [parse] uid={uid}: 重燃中 {recover[0]}/{recover[1]}"
+                     f"（{days} 天待恢复）", "PARSE")
             else:
                 status = "active"
         else:
@@ -1872,12 +1932,17 @@ def parse_fire_streaks(resp_bytes: bytes, include_all: bool = False) -> list[dic
             # init 二进制响应里按距离猜头像会张冠李戴，故此处留空待补
             "avatar": "",
             "status": status,
+            # 重燃进度：已连上几天 / 还需几天。非 recovering 时都是 0。
+            # days 是「待恢复的原有天数」，恢复成功就回到那个数
+            "recover_days": recover[0] if (recover and status == "recovering") else 0,
+            "recover_need_days": recover[1] if (recover and status == "recovering") else 0,
             "conversation_short_id": short_id,
             "ticket": ticket,
         })
 
-    # active → broken → none，各自按天数倒序
-    _rank = {"active": 0, "broken": 1, "none": 2}
+    # active → recovering → broken → none，各自按天数倒序。
+    # recovering 排在 active 后面、broken 前面：它们还救得回来，且有窗口期
+    _rank = {"active": 0, "recovering": 1, "broken": 2, "none": 3}
     return sorted(result, key=lambda x: (_rank.get(x["status"], 1), -x["days"]))
 
 

@@ -109,11 +109,18 @@ def test_vanished_contacts_are_removed(db, acc):
 
     真实踩到的：用户看到早已消失的好友还挂在页面上 ——
     upsert 只增不删，旧行一直留着。
+
+    注意 init 只回最近活跃的会话，所以要过了宽限期才删（见下面
+    test_prune_keeps_recently_synced_contact）。
     """
     cs.upsert_cache(db, acc.id, SAMPLE); db.commit()
     assert db.query(Contact).filter(Contact.douyin_account_id == acc.id).count() == 2
 
-    # 这次抖音只回了 111，222 已经不在了
+    # 222 已经很久没被同步到了 —— 这次抖音也没回它，可以确认真没了
+    gone = db.query(Contact).filter(Contact.uid == "222").first()
+    gone.last_synced_at = datetime.utcnow() - timedelta(days=cs.PRUNE_GRACE_DAYS + 1)
+    db.commit()
+
     cs.upsert_cache(db, acc.id, [SAMPLE[0]], prune=True); db.commit()
 
     uids = {c.uid for c in db.query(Contact).filter(
@@ -312,3 +319,90 @@ def test_load_cached_exposes_conv_short_id(db, acc):
     ]); db.commit()
     out = {c["uid"]: c for c in cs.load_cached(db, acc.id)}
     assert out["111"]["conversation_short_id"] == 777
+
+
+# ── prune 宽限期 ─────────────────────────────────────────────────
+
+def test_prune_keeps_recently_synced_contact(db, acc):
+    """核心回归：init 只回最近活跃的会话，一次没回不代表好友没了。
+
+    真实事故：账号 3 的「王女士 906 天」「顺风吖 905 天」「团团 327 天」
+    最近没互动，掉出 init 返回范围，prune 直接把三条最久的火花删了。
+    """
+    cs.upsert_cache(db, acc.id, SAMPLE); db.commit()
+
+    # 这次抖音只回了 111 —— 222 刚同步过，不该动它
+    cs.upsert_cache(db, acc.id, [SAMPLE[0]], prune=True); db.commit()
+
+    uids = {c.uid for c in db.query(Contact).filter(
+        Contact.douyin_account_id == acc.id).all()}
+    assert uids == {"111", "222"}, "一次没回就被删了"
+
+
+def test_prune_removes_long_missing_contact(db, acc):
+    """真删好友/注销的还是要清掉 —— 超过宽限期没同步到才删。"""
+    cs.upsert_cache(db, acc.id, SAMPLE); db.commit()
+
+    stale = db.query(Contact).filter(Contact.uid == "222").first()
+    stale.last_synced_at = datetime.utcnow() - timedelta(days=8)
+    db.commit()
+
+    cs.upsert_cache(db, acc.id, [SAMPLE[0]], prune=True); db.commit()
+
+    uids = {c.uid for c in db.query(Contact).filter(
+        Contact.douyin_account_id == acc.id).all()}
+    assert uids == {"111"}, "超过宽限期的没被清理"
+
+
+def test_prune_grace_boundary(db, acc):
+    """刚好卡在宽限期内的要留着。"""
+    cs.upsert_cache(db, acc.id, SAMPLE); db.commit()
+    row = db.query(Contact).filter(Contact.uid == "222").first()
+    row.last_synced_at = datetime.utcnow() - timedelta(days=6)
+    db.commit()
+
+    cs.upsert_cache(db, acc.id, [SAMPLE[0]], prune=True); db.commit()
+    assert db.query(Contact).filter(Contact.uid == "222").first() is not None
+
+
+# ── 重燃中（recovering）落库与展示 ────────────────────────────────
+
+RECOVERING = {"uid": "444", "nickname": "慢慢", "conv_id": "c4", "days": 543,
+              "avatar": "", "status": "recovering",
+              "recover_days": 2, "recover_need_days": 3}
+
+
+def test_recovering_progress_is_persisted(db, acc):
+    """重燃进度要存下来 —— 用户得知道还差几天才能把 543 天救回来。"""
+    cs.upsert_cache(db, acc.id, [RECOVERING]); db.commit()
+    row = db.query(Contact).filter(Contact.uid == "444").first()
+    assert row.status == "recovering"
+    assert row.days == 543
+    assert (row.recover_days, row.recover_need_days) == (2, 3)
+
+
+def test_load_cached_exposes_recover_progress(db, acc):
+    cs.upsert_cache(db, acc.id, [RECOVERING]); db.commit()
+    out = {c["uid"]: c for c in cs.load_cached(db, acc.id)}
+    assert out["444"]["recover_days"] == 2
+    assert out["444"]["recover_need_days"] == 3
+
+
+def test_recovering_sorts_between_active_and_broken(db, acc):
+    """段控顺序：在烧 → 重燃中 → 已断 → 无火花。"""
+    cs.upsert_cache(db, acc.id, [*SAMPLE, RECOVERING, NO_SPARK]); db.commit()
+    assert [c["status"] for c in cs.load_cached(db, acc.id)] == \
+        ["active", "recovering", "broken", "none"]
+
+
+def test_recovering_progress_cleared_when_back_to_active(db, acc):
+    """重燃成功变回 active 后，进度要清掉，别在界面上留个 2/3 的残影。"""
+    cs.upsert_cache(db, acc.id, [RECOVERING]); db.commit()
+    cs.upsert_cache(db, acc.id, [
+        {**RECOVERING, "status": "active", "recover_days": 0,
+         "recover_need_days": 0},
+    ]); db.commit()
+
+    row = db.query(Contact).filter(Contact.uid == "444").first()
+    assert row.status == "active"
+    assert (row.recover_days or 0) == 0

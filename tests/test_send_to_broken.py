@@ -188,3 +188,46 @@ def test_put_schedule_without_flags_keeps_current(db, acc, login):
     db.refresh(sch)
     assert sch.send_to_broken is False
     assert sch.send_to_no_spark is True
+
+
+# ── 重燃中（recovering）─────────────────────────────────────────────
+
+RECOVER = {"uid": "444", "nickname": "重燃中", "conv_id": "c4", "days": 543,
+           "status": "recovering", "recover_days": 2, "recover_need_days": 3}
+
+
+@pytest.fixture
+def fake_with_recovering(monkeypatch):
+    sent = []
+    monkeypatch.setattr(trigger, "_ensure_active",
+                        lambda ctx: ({}, {}, [dict(c) for c in CONTACTS] + [dict(RECOVER)]))
+    monkeypatch.setattr(trigger, "_adaptive_interval",
+                        lambda account_id, base=5.0: (0.0, "test"))
+    monkeypatch.setattr(trigger.dy, "_log", lambda *a, **k: None)
+    monkeypatch.setattr(trigger.dy, "get_last_send_info", lambda: {"msg": "OK"})
+    monkeypatch.setattr(trigger.dy, "_pick_message",
+                        lambda uid, name, tpl: "早", raising=False)
+    monkeypatch.setattr(trigger.dy, "send_text",
+                        lambda s, cid, t, c, k: sent.append(c["uid"]) or True)
+    monkeypatch.setattr(trigger.time, "sleep", lambda *_: None)
+    return sent
+
+
+def test_recovering_is_always_sent(db, acc, fake_with_recovering):
+    """重燃中的人任何开关组合下都要发 —— 窗口过了 543 天就真没了，
+    这是所有联系人里最紧急的一类，不该被任何开关挡住。"""
+    u, a = acc
+    _sch(db, a.id, send_to_broken=False, send_to_no_spark=False)
+
+    trigger.auto_run(u.id, a.id, triggered_by="test")
+
+    assert "444" in fake_with_recovering, "重燃中的人被开关挡掉了"
+
+
+def test_recovering_goes_first(db, acc, fake_with_recovering):
+    """重燃中排在最前面发：任务被熔断/中断时，先保住最急的那批。"""
+    u, a = acc
+    _sch(db, a.id)
+    trigger.auto_run(u.id, a.id, triggered_by="test")
+    assert fake_with_recovering[0] == "444", \
+        f"发送顺序 {fake_with_recovering}，重燃中的没排在最前"
