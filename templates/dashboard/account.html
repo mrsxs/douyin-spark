@@ -512,6 +512,28 @@
           {% endfor %}
         </div>
       </div>
+      {#
+        发送间隔：每条之间随机等这个区间里的一个秒数。
+        太快撞风控，太慢一百个联系人能跑到天亮 —— 合适的节奏只有用号的人知道，
+        所以交给用户自己调，不做成写死的常量。
+      #}
+      <div class="p-3 rounded-xl bg-ios-fill2 dark:bg-slate-700/40">
+        <div class="text-sm font-medium text-ios-label dark:text-slate-100">每条消息间隔</div>
+        <div class="flex items-center gap-2 mt-2">
+          <input type="number" id="sch-min" min="1" max="300" step="0.5"
+                 value="{{ schedule.send_min_sec or 4.5 }}" onchange="saveSchedule()"
+                 class="input w-20 text-center" />
+          <span class="text-ios-label3">~</span>
+          <input type="number" id="sch-max" min="1" max="300" step="0.5"
+                 value="{{ schedule.send_max_sec or 5.5 }}" onchange="saveSchedule()"
+                 class="input w-20 text-center" />
+          <span class="text-sm text-ios-label3">秒，每条随机取</span>
+        </div>
+        <p class="text-xs text-ios-label3 mt-2 leading-relaxed">
+          连续发失败时会在这个区间之上自动再降速（3 倍 / 12 倍）——
+          那是防风控的保险，不受这里影响。
+        </p>
+      </div>
       {% if schedule.last_ran_date %}
       <div class="text-xs text-ios-label3 pt-1">
         最后触发：{{ schedule.last_ran_date }}
@@ -806,7 +828,7 @@ function accountPage() {
         if (force || this._snapshotStale(fresh)) {
           // 只放行一次。重载完快照还是旧的，说明这页压根没被重新生成
           // （典型是 CDN/代理在发缓存副本），再刷就是无限刷屏 ——
-          // 线上真出过：页面一直自我刷新、「同步中��一直转，只能关标签页。
+          // 线上真出过：页面一直自我刷新、「同步中」一直转，只能关标签页。
           if (window._reloadOnce('acct-sync')) {
             location.reload();
             return;
@@ -1105,8 +1127,12 @@ async function saveSchedule() {
   const time = document.getElementById('sch-time').value;
   const send_to_broken = document.getElementById('sch-broken').checked;
   const send_to_no_spark = document.getElementById('sch-nospark').checked;
+  const send_min_sec = parseFloat(document.getElementById('sch-min').value);
+  const send_max_sec = parseFloat(document.getElementById('sch-max').value);
   const r = await api('/api/schedule/{{ acc.id }}', 'PUT',
-                      {enabled, time, send_to_broken, send_to_no_spark});
+                      {enabled, time, send_to_broken, send_to_no_spark,
+                       send_min_sec, send_max_sec});
+  // 后端会把「为什么不合法」说清楚（太快/太慢/最小大于最大），原样透出去
   toast(r.ok ? '定时已保存' : r.error, r.ok ? 'ok' : 'err');
 }
 </script>

@@ -71,6 +71,24 @@ def _row_to_dict(m: ChatMessage) -> dict:
     }
 
 
+def get_message(db: Session, account_id: int, msg_id: int) -> dict | None:
+    """按 (账号, 本地行 id) 取单条消息。找不到返回 None。
+
+    account_id 是查询条件的一部分而不是查完再比 —— 少一次「忘了判归属」的机会。
+
+    Why 用本地 id 而不是 server_msg_id：抖音的 server_message_id 是 19 位雪花号
+    （实测 7.54e18 ~ 7.68e18），**全部**超出 JS 的 Number.MAX_SAFE_INTEGER
+    (9.007e15)。它一进浏览器就被 JSON.parse 四舍五入，再发回来已经不是原值，
+    库里根本查不到。本地 id 是小自增，往返不会失真。
+    """
+    row = db.execute(
+        select(ChatMessage).where(
+            ChatMessage.douyin_account_id == account_id,
+            ChatMessage.id == msg_id)
+    ).scalar_one_or_none()
+    return _row_to_dict(row) if row is not None else None
+
+
 def sync_messages(db: Session, account_id: int, messages: list[dict]) -> int:
     """把解析出的消息并入冷备表，返回新增条数。"""
     return len(sync_and_collect(db, account_id, messages))
@@ -129,6 +147,9 @@ def sync_and_collect(db: Session, account_id: int,
             created_ms=int(m.get("created_at") or 0),
         )
         db.add(row)
+        # flush 一下拿到自增 id：这批消息会直接推给浏览器，前端要拿 id 调
+        # 「转文字」之类的接口。不 flush 的话推出去的 id 是 null。
+        db.flush()
         added.append(_row_to_dict(row))
     added.sort(key=lambda m: m["created_at"])
     return added

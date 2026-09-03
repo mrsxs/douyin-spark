@@ -458,6 +458,15 @@ _KIND_MARKER = {
 }
 
 
+def _asr_of(m: dict) -> str:
+    """取这条语音的转写文本（voice_service 转完写回 media.asr）。"""
+    media = m.get("media")
+    if not isinstance(media, dict):
+        return ""
+    asr = media.get("asr")
+    return asr.strip() if isinstance(asr, str) else ""
+
+
 def _history_text(m: dict) -> str:
     """一条消息进上下文时的文本形态；返回空串表示不进上下文。"""
     kind = m.get("kind") or ""
@@ -468,6 +477,16 @@ def _history_text(m: dict) -> str:
     marker = _KIND_MARKER.get(kind)
     if not marker:
         return ""
+    # 语音转写过就用转写内容 —— 存了不用等于白存，
+    # 模型翻上文只会看到「[语音] 11.7″」，等于这条没发生过
+    if kind == "audio":
+        asr = _asr_of(m)
+        if asr:
+            return f"{marker} {asr}"
+    # text 常常自己就带着 marker 前缀（_audio_label 生成的是「[语音] 11.7″」，
+    # 图片/视频的占位符干脆就等于 marker），不判一下会拼出「[语音] [语音] 11.7″」
+    if text.startswith(marker):
+        return text
     # 分享类带标题，标题往往就是对话在聊的东西，必须留
     return f"{marker} {text}".strip() if text else marker
 

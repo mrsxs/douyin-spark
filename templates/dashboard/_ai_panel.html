@@ -288,6 +288,79 @@
               <h3 class="text-sm font-bold text-ios-label dark:text-slate-100">安全与限流</h3>
             </div>
 
+            {#
+              回复分享视频的开关。放这里而不是「回复策略」——
+              它的实质是「要不要为这条消息多打一次抖音接口」，是风控问题。
+            #}
+            <div class="flex items-start gap-3">
+              <div class="min-w-0 flex-1">
+                <label class="{{ LABEL }} !mb-0.5">回复对方分享的视频</label>
+                <p class="text-[11px] text-ios-label3 leading-relaxed">
+                  开了之后，对方分享视频时会先去抖音解析出文案和内容总结再回复。
+                  <b>每条分享会多打一次抖音接口</b>（同一个视频只解析一次，之后走缓存）。
+                  解析不出来就不回，不会瞎接话。
+                </p>
+              </div>
+              <button type="button" @click="aiCfg.reply_share = !aiCfg.reply_share"
+                      class="ios-switch shrink-0 mt-0.5"
+                      :class="aiCfg.reply_share ? 'ios-switch-on' : 'ios-switch-off'"
+                      :aria-checked="aiCfg.reply_share" role="switch"
+                      aria-label="回复对方分享的视频">
+                <span class="ios-switch-knob"></span>
+              </button>
+            </div>
+
+            {#
+              语音开关 + ASR 配置。折叠在开关下面 —— 没开的人不该被
+              三个额外输入框挡住视线。
+            #}
+            <div class="flex items-start gap-3">
+              <div class="min-w-0 flex-1">
+                <label class="{{ LABEL }} !mb-0.5">回复对方发的语音</label>
+                <p class="text-[11px] text-ios-label3 leading-relaxed">
+                  抖音的语音<b>不带文字</b>，得先转写成文字模型才看得懂。
+                  <b>需要单独配一个语音转写服务</b>（下方），没配就等于没开。
+                  转出来的文字会显示在聊天气泡下面。
+                </p>
+              </div>
+              <button type="button" @click="aiCfg.reply_voice = !aiCfg.reply_voice"
+                      class="ios-switch shrink-0 mt-0.5"
+                      :class="aiCfg.reply_voice ? 'ios-switch-on' : 'ios-switch-off'"
+                      :aria-checked="aiCfg.reply_voice" role="switch"
+                      aria-label="回复对方发的语音">
+                <span class="ios-switch-knob"></span>
+              </button>
+            </div>
+
+            <div x-show="aiCfg.reply_voice" x-cloak
+                 class="rounded-xl bg-ios-fill3/40 dark:bg-slate-800/60 p-3 space-y-2">
+              <p class="text-[11px] text-ios-label2 dark:text-slate-300 leading-relaxed">
+                任何 OpenAI 兼容的 <code class="px-1 rounded bg-ios-fill2 dark:bg-slate-700">/audio/transcriptions</code>
+                都行（硅基流动、Groq、OpenAI、本地 whisper）。
+                <b>不能填上面那个模型的地址</b> —— DeepSeek 没有语音转写接口。
+              </p>
+              <div>
+                <label class="{{ LABEL }}">转写服务地址</label>
+                <input x-model="aiCfg.asr_base_url" type="text" class="{{ FIELD }}"
+                       placeholder="https://api.siliconflow.cn/v1">
+              </div>
+              <div>
+                <label class="{{ LABEL }}">转写模型</label>
+                <input x-model="aiCfg.asr_model" type="text" class="{{ FIELD }}"
+                       placeholder="FunAudioLLM/SenseVoiceSmall">
+              </div>
+              <div>
+                <label class="{{ LABEL }}">转写 API Key</label>
+                <input x-model="aiAsrKeyInput" type="password" class="{{ FIELD }}"
+                       autocomplete="new-password" spellcheck="false"
+                       :placeholder="aiCfg.has_asr_key ? '已配置 · 留空则不修改' : 'sk-…'">
+                {# 和上面的模型 Key 一样要有撤销路径：存进去的是凭证，
+                   只能加不能删的话，换服务商或者 key 泄露了都没法收拾 #}
+                <button x-show="aiCfg.has_asr_key" type="button" @click="removeAsrKey()"
+                        class="mt-1 text-[11px] font-semibold text-ios-red hover:underline">移除转写 Key</button>
+              </div>
+            </div>
+
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="{{ LABEL }}">回复字数上限</label>

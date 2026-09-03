@@ -173,6 +173,46 @@
               <iconify-icon :icon="peerAiOn ? 'lucide:bot' : 'lucide:bot-off'"
                             width="15" height="15"></iconify-icon>
             </button>
+
+            {#
+              「回不回他分享的视频」的三态覆盖：跟随账号级 / 单独开 / 单独关。
+              只在这个人已开 AI 回复时才出现 —— 没开的时候它没有意义，
+              摆出来只会让人以为开了它就会回。
+            #}
+            <button x-show="peerAiOn" @click="cyclePeerShare()" :disabled="aiPeerSaving"
+              class="w-8 h-8 rounded-full flex items-center justify-center transition disabled:opacity-40"
+              :class="peerShareState === true
+                ? 'bg-ios-blueBg text-ios-blue'
+                : (peerShareState === false
+                    ? 'bg-ios-fill2 text-ios-label3 line-through'
+                    : 'hover:bg-ios-fill2 text-ios-label3')"
+              :title="peerShareState === true
+                ? '对他：回复分享的视频（点击改为不回）'
+                : (peerShareState === false
+                    ? '对他：不回分享的视频（点击改为跟随总设置）'
+                    : (aiCfg.reply_share
+                        ? '跟随总设置：会回分享的视频（点击单独关闭）'
+                        : '跟随总设置：不回分享的视频（点击单独开启）'))">
+              <iconify-icon icon="lucide:video" width="15" height="15"></iconify-icon>
+            </button>
+
+            <!-- 语音的三态覆盖，语义同上 -->
+            <button x-show="peerAiOn" @click="cyclePeerVoice()" :disabled="aiPeerSaving"
+              class="w-8 h-8 rounded-full flex items-center justify-center transition disabled:opacity-40"
+              :class="peerVoiceState === true
+                ? 'bg-ios-blueBg text-ios-blue'
+                : (peerVoiceState === false
+                    ? 'bg-ios-fill2 text-ios-label3 line-through'
+                    : 'hover:bg-ios-fill2 text-ios-label3')"
+              :title="peerVoiceState === true
+                ? '对他：回复语音（点击改为不回）'
+                : (peerVoiceState === false
+                    ? '对他：不回语音（点击改为跟随总设置）'
+                    : (aiCfg.reply_voice
+                        ? '跟随总设置：会回语音（点击单独关闭）'
+                        : '跟随总设置：不回语音（点击单独开启）'))">
+              <iconify-icon icon="lucide:mic" width="15" height="15"></iconify-icon>
+            </button>
           </div>
 
           {# 总开关没开时，联系人开关是无效的，必须说清楚，否则用户以为坏了 #}
@@ -232,9 +272,41 @@
                            ? 'bg-ios-tint text-white rounded-br-md'
                            : 'bg-white dark:bg-slate-700 text-ios-label dark:text-slate-100 rounded-bl-md border border-ios-sep dark:border-slate-600'">
 
-                      <!-- 内嵌媒体：分享的视频/图片直接看到画面，不用只读一行标题 -->
-                      {# 表情包排除在外 —— 它下面有自己的渲染（原尺寸贴出来，不裁剪不点开） #}
-                      <template x-if="m.media && m.media.cover && m.media.kind !== 'emoji'">
+                      {#
+                        分享的视频：就在气泡里原生播，不弹窗、不跳走。
+                        走自己的 /api/videos/… 反代 —— 抖音直链带时效签名又认
+                        Referer，塞进页面既会过期又会把内容散出去（见后端注释）。
+
+                        preload="none" 是关键：不点就一个字节都不拉。
+                        翻聊天记录时一屏几十条视频，预加载能把流量打爆。
+                      #}
+                      <template x-if="m.media && m.media.kind === 'video' && awemeIdOf(m)">
+                        <div class="mb-1.5">
+                          <video :src="`/api/videos/{{ acc.id }}/${awemeIdOf(m)}/stream`"
+                                 x-init="probeVideoPoster($el, m)"
+                                 controls playsinline preload="none"
+                                 {# 竖屏 9:16 撑满，横屏视频黑边留白 —— 抖音九成是竖的，
+                                    按竖屏定框，横屏的那一成 object-contain 兜住不变形 #}
+                                 class="block w-[260px] max-w-full aspect-[9/16] object-contain
+                                        rounded-xl bg-black"></video>
+                          {# 播不出来时的退路：源站删了/仅粉丝可见，这里点得回抖音 #}
+                          <a :href="`https://www.douyin.com/video/${awemeIdOf(m)}`"
+                             target="_blank" rel="noopener noreferrer"
+                             class="mt-0.5 inline-block text-[11px] underline opacity-60 hover:opacity-90">
+                            在抖音打开
+                          </a>
+                        </div>
+                      </template>
+
+                      <!-- 图片：封面点开看大图 -->
+                      {#
+                        表情包排除在外 —— 它下面有自己的渲染（原尺寸贴出来，不裁剪不点开）。
+                        认不出 id 的视频分享也走这里：播不了，但至少还能看见封面 ——
+                        不然那种气泡会整个空掉，比改之前还差。
+                      #}
+                      <template x-if="m.media && m.media.cover
+                                      && m.media.kind !== 'emoji'
+                                      && !(m.media.kind === 'video' && awemeIdOf(m))">
                         <button @click="openMedia(m)" type="button"
                           class="block relative mb-1.5 rounded-xl overflow-hidden bg-black/10 w-44 max-w-full">
                           {#
@@ -246,22 +318,6 @@
                                referrerpolicy="no-referrer"
                                class="w-full max-h-56 object-cover"
                                @error="onCoverError($event, m)">
-                          <template x-if="m.media.kind === 'video'">
-                            <span class="absolute inset-0 flex items-center justify-center">
-                              <span class="w-10 h-10 rounded-full bg-black/55 backdrop-blur flex items-center justify-center">
-                                <iconify-icon icon="lucide:play" width="18" height="18" class="text-white ml-0.5"></iconify-icon>
-                              </span>
-                            </span>
-                          </template>
-                        </button>
-                      </template>
-
-                      <!-- 没封面但有视频 id：至少给个能点开的入口 -->
-                      <template x-if="m.media && !m.media.cover && m.media.vid">
-                        <button @click="openMedia(m)" type="button"
-                          class="flex items-center gap-1 mb-1 text-xs underline opacity-80">
-                          <iconify-icon icon="lucide:play-circle" width="13" height="13"></iconify-icon>
-                          播放视频
                         </button>
                       </template>
 
@@ -305,6 +361,22 @@
                           </button>
                           <p x-show="m.media.asr" class="mt-1 text-xs opacity-80 whitespace-pre-wrap"
                              x-text="m.media.asr"></p>
+
+                          {#
+                            没转过的才显示按钮。转写结果写回 media.asr，
+                            点一次就永久存下来了，AI 之后要回也直接命中缓存。
+                          #}
+                          <button x-show="!m.media.asr" type="button"
+                                  @click="transcribe(m)"
+                                  :disabled="asrBusyId === m.server_msg_id"
+                                  class="mt-1 flex items-center gap-1 text-[11px] opacity-70 hover:opacity-100 disabled:opacity-40"
+                                  :class="m.is_me ? 'text-white' : 'text-ios-tint'">
+                            <iconify-icon
+                              :icon="asrBusyId === m.server_msg_id ? 'lucide:loader-2' : 'lucide:file-text'"
+                              :class="asrBusyId === m.server_msg_id && 'animate-spin'"
+                              width="12" height="12"></iconify-icon>
+                            <span x-text="asrBusyId === m.server_msg_id ? '转写中…' : '转文字'"></span>
+                          </button>
                         </div>
                       </template>
 
@@ -362,18 +434,6 @@
         <iconify-icon icon="lucide:x" width="18" height="18"></iconify-icon>
       </button>
 
-      <template x-if="viewer && viewer.kind === 'video'">
-        {#
-          抖音官方内嵌播放器。不用 <video> 是因为真实播放地址是带时效签名的，
-          存下来很快就 403，而且要带 referer 才放行 —— 官方 iframe 没这些问题。
-        #}
-        <div class="rounded-2xl overflow-hidden bg-black aspect-[9/16] max-h-[78vh]">
-          <iframe :src="viewer.src" class="w-full h-full" frameborder="0"
-                  allow="autoplay; encrypted-media; fullscreen"
-                  referrerpolicy="no-referrer" allowfullscreen></iframe>
-        </div>
-      </template>
-
       <template x-if="viewer && viewer.kind === 'image'">
         <img :src="viewer.src" alt="" referrerpolicy="no-referrer"
              class="w-full max-h-[80vh] object-contain rounded-2xl">
@@ -381,11 +441,6 @@
 
       <p x-show="viewer && viewer.text" class="mt-2 text-xs text-white/70 text-center"
          x-text="viewer && viewer.text"></p>
-      <a x-show="viewer && viewer.kind === 'video'" :href="viewer.page" target="_blank"
-         rel="noopener noreferrer"
-         class="mt-2 block text-center text-xs text-white/60 hover:text-white underline">
-        在抖音打开
-      </a>
     </div>
   </div>
 </div>
@@ -433,6 +488,8 @@ function aiMixin() {
     aiCfg: { enabled: false, provider: 'openai', base_url: '', model: '',
              has_key: false, persona: '', prompt_template: '', reply_format: '',
              banned_words: '', decline_policy: '', fewshot: '', thinking: true,
+             reply_share: false, reply_voice: false,
+             asr_base_url: '', asr_model: '', has_asr_key: false,
              max_chars: 60, cooldown_sec: 20, daily_limit: 100,
              history_turns: 6, poll_interval: 30 },
     // 代码内置的策略原文。空输入框拿它当占位 —— 用户既能看到默认是什么，
@@ -441,6 +498,11 @@ function aiMixin() {
     promptPreview: '',
     aiPeers: {},
     aiKeyInput: '',
+    // 同 aiKeyInput：key 不回显，所以单独放，不进 aiCfg
+    // （loadAi 会整体替换 aiCfg，放里面会被冲掉）
+    aiAsrKeyInput: '',
+    // 正在转写的那条语音的 server_msg_id，用来只转一个按钮的圈
+    asrBusyId: null,
     aiSaving: false,
     aiPeerSaving: false,
 
@@ -464,6 +526,17 @@ function aiMixin() {
     },
     get aiEnabledCount() {
       return Object.values(this.aiPeers).filter(p => p && p.enabled).length;
+    },
+    // 三态：null = 跟随账号级，true/false = 只对这个人生效。
+    // 必须区分 null 和 false —— 折叠成布尔的话，「显式关掉」会在
+    // 总开关打开后被悄悄改成「回」。
+    get peerShareState() {
+      const p = this.aiPeers[this.peerUid];
+      return p && p.reply_share !== undefined ? p.reply_share : null;
+    },
+    get peerVoiceState() {
+      const p = this.aiPeers[this.peerUid];
+      return p && p.reply_voice !== undefined ? p.reply_voice : null;
     },
 
     async loadAi() {
@@ -527,6 +600,11 @@ function aiMixin() {
         decline_policy: this.aiCfg.decline_policy,
         fewshot: this.aiCfg.fewshot,
         thinking: this.aiCfg.thinking,
+        reply_share: this.aiCfg.reply_share,
+        reply_voice: this.aiCfg.reply_voice,
+        asr_base_url: this.aiCfg.asr_base_url,
+        asr_model: this.aiCfg.asr_model,
+
         max_chars: this.aiCfg.max_chars,
         cooldown_sec: this.aiCfg.cooldown_sec,
         daily_limit: this.aiCfg.daily_limit,
@@ -535,6 +613,8 @@ function aiMixin() {
       };
       // 空输入框意味着「没动它」，不是「清空」—— 清空走 removeAiKey
       if (this.aiKeyInput.trim()) p.api_key = this.aiKeyInput.trim();
+      // 和主 key 同一套语义：留空 = 没动它，不会把已存的清掉
+      if (this.aiAsrKeyInput.trim()) p.asr_api_key = this.aiAsrKeyInput.trim();
 
       this.aiSaving = true;
       const r = await api(`/api/ai/${ACC_ID}`, 'PUT', p);
@@ -542,6 +622,7 @@ function aiMixin() {
       if (!r.ok) { toast(r.error || '保存失败', 'err'); return; }
       this.aiCfg = r.config;
       this.aiKeyInput = '';
+      this.aiAsrKeyInput = '';
       toast('已保存');
     },
 
@@ -550,6 +631,16 @@ function aiMixin() {
       const r = await api(`/api/ai/${ACC_ID}`, 'PUT', { api_key: null, enabled: false });
       if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
       this.aiCfg = r.config;
+      toast('已移除');
+    },
+
+    async removeAsrKey() {
+      if (!confirm('移除转写 Key？语音转文字会随之停止工作。')) return;
+      const r = await api(`/api/ai/${ACC_ID}`, 'PUT',
+                          { asr_api_key: null, reply_voice: false });
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiCfg = r.config;
+      this.aiAsrKeyInput = '';
       toast('已移除');
     },
 
@@ -564,6 +655,53 @@ function aiMixin() {
       this.aiPeers[this.peerUid] = r.peer;
       const who = this.peer ? (this.peer.nickname || this.peer.uid) : '他';
       toast(want ? `AI 将自动回复 ${who}` : `已关闭对 ${who} 的自动回复`);
+    },
+
+    // 跟随 → 单独开 → 单独关 → 跟随。三态循环，点三下回到原点。
+    async cyclePeerShare() {
+      if (!this.peerUid) return;
+      const cur = this.peerShareState;
+      const next = cur === null ? true : (cur === true ? false : null);
+      this.aiPeerSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}/peer/${encodeURIComponent(this.peerUid)}`,
+                          'PUT', { reply_share: next });
+      this.aiPeerSaving = false;
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiPeers[this.peerUid] = r.peer;
+      toast(next === null
+              ? '分享视频：跟随总设置'
+              : (next ? '分享视频：单独开启' : '分享视频：单独关闭'));
+    },
+
+    async cyclePeerVoice() {
+      if (!this.peerUid) return;
+      const cur = this.peerVoiceState;
+      const next = cur === null ? true : (cur === true ? false : null);
+      this.aiPeerSaving = true;
+      const r = await api(`/api/ai/${ACC_ID}/peer/${encodeURIComponent(this.peerUid)}`,
+                          'PUT', { reply_voice: next });
+      this.aiPeerSaving = false;
+      if (!r.ok) { toast(r.error || '操作失败', 'err'); return; }
+      this.aiPeers[this.peerUid] = r.peer;
+      toast(next === null
+              ? '语音：跟随总设置'
+              : (next ? '语音：单独开启' : '语音：单独关闭'));
+    },
+
+    // 手动把一条语音转成文字。结果写回 media.asr，
+    // 所以刷新后依然在，也不会重复计费。
+    async transcribe(m) {
+      if (!m || this.asrBusyId) return;
+      this.asrBusyId = m.server_msg_id;
+      try {
+        const r = await api(`/api/messages/${ACC_ID}/transcribe`, 'POST',
+                            { id: m.id });   // 本地行 id：server_msg_id 是 19 位雪花号，进 JS 就失真
+        if (!r.ok) { toast(r.error || '转写失败', 'err'); return; }
+        // 就地更新这条气泡，不用整页重拉
+        m.media = Object.assign({}, m.media, { asr: r.text });
+      } finally {
+        this.asrBusyId = null;
+      }
     },
 
     insertVar(field, name) {
@@ -937,6 +1075,24 @@ function chat() {
       });
     },
 
+    // <video> 的 poster 没有 error 事件：签名封面过期(403)时只会留一块死黑，
+    // 图片那条路的 cover_alt 回退在这儿用不上。所以先用一张离屏 Image 探路，
+    // 探通了才挂上去；都挂了就干脆不要 poster —— 黑底加个播放键更像「能点」。
+    probeVideoPoster(el, m) {
+      const md = m.media || {};
+      const chain = [md.cover, md.cover_alt].filter(Boolean);
+      el.removeAttribute('poster');            // 探明之前不显示，免得闪一下破图
+      const tryAt = (i) => {
+        if (i >= chain.length) return;
+        const probe = new Image();
+        probe.referrerPolicy = 'no-referrer';  // 和 <img> 那边保持一致，否则签名校验会挂
+        probe.onload  = () => { el.poster = chain[i]; };
+        probe.onerror = () => tryAt(i + 1);
+        probe.src = chain[i];
+      };
+      tryAt(0);
+    },
+
     onCoverError(ev, m) {
       const img = ev.target, md = m.media || {};
       // 签名过期 → 换去签名版本再试一次；再挂就把整块封面藏掉
@@ -949,20 +1105,24 @@ function chat() {
       if (box) box.style.display = 'none';
     },
 
+    // 从消息文本里补提抖音视频 id。**纯本地，不发请求** ——
+    // 规则和后端 douyin_im.extract_aweme_id 保持一致。
+    // 有些分享消息（抖音只给链接不给 item_id）解不出 media.vid，
+    // 不补这一手的话，那种气泡点了毫无反应。
+    awemeIdOf(m) {
+      const md = m.media || {};
+      if (md.vid) return md.vid;
+      const t = m.text || '';
+      const hit = t.match(
+        /https?:\/\/(?:[\w-]+\.)*(?:douyin|iesdouyin)\.com\/[^\s]*?(?:video\/|modal_id=)(\d{15,24})/i);
+      return hit ? hit[1] : '';
+    },
+
+    // 只剩图片走弹窗了 —— 视频改成气泡里原生播放，不再开层
     openMedia(m) {
       const md = m.media;
-      if (!md) return;
-      if (md.kind === 'video') {
-        if (!md.vid) return;                       // 没 id 播不了，别开个空窗
-        this.viewer = {
-          kind: 'video',
-          src: `https://open.douyin.com/player/video?vid=${encodeURIComponent(md.vid)}&autoplay=0`,
-          page: `https://www.douyin.com/video/${encodeURIComponent(md.vid)}`,
-          text: m.text,
-        };
-      } else {
-        this.viewer = { kind: 'image', src: md.cover, text: '' };
-      }
+      if (!md || !md.cover) return;
+      this.viewer = { kind: 'image', src: md.cover, text: '' };
     },
 
     closeMedia() { this.viewer = null; },

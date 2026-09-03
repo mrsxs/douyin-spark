@@ -6,7 +6,12 @@ Why: get_message_by_init 每个会话只回最近 ~21 条，两次同步之间�
 
 协议是 2026-08-29 从抖音网页版抓包确认的，见 obsidian-vault/60-抖音协议与签名。
 请求体 (cmd=301)：1=conversation_id, 2=conversation_type, 3=conversation_short_id,
-4=direction, 5=cursor(微秒), 6=limit；响应 2=next_cursor, 3=has_more。
+4=direction, 5=cursor, 6=limit；响应 1=repeated 消息, 3=has_more。
+
+**下一页的 cursor 来自每条消息自带的 field 4，取本页最小值（= 最老那条）**，
+不是响应外层的 field 2 —— f2 只是把请求里的 cursor 原样回显。早期照 f2 翻页，
+第二页永远等于第一页，一个会话只补得回 50 条，聊天记录就卡在某一天上不去了。
+cursor 也不是时间戳，是会话内序号：base + index*10000（index = 消息 field 17）。
 """
 import os
 import sys
@@ -106,23 +111,52 @@ def test_limit_is_clamped():
 
 # ── 响应解析 ─────────────────────────────────────────────────────
 
-def _fake_response(msgs_blob: bytes, next_cursor: int, has_more: int) -> bytes:
-    """仿 cmd=301 响应：外层 f6 → 内层 f301 → {1:消息, 2:cursor, 3:has_more}"""
-    inner = msgs_blob + dy._pb_v(2, next_cursor) + dy._pb_v(3, has_more)
+def _msg(cursor: int, index: int = 0) -> bytes:
+    """仿一条历史消息：field 4 = 它自己的 cursor，field 17 = 会话内序号。"""
+    return dy._pb_b(1, dy._pb_v(4, cursor) + dy._pb_v(17, index)
+                    + dy._pb_v(10, 1788349647319))
+
+
+def _fake_response(msgs: list[int], has_more: int, echo_cursor: int = 999) -> bytes:
+    """仿 cmd=301 响应：外层 f6 → 内层 f301 → {1:消息…, 2:回显, 3:has_more}
+
+    f2 特意填一个和消息无关的值 —— 谁要是又拿它当 next_cursor，测试会挂。
+    """
+    blob = b"".join(_msg(c, i) for i, c in enumerate(msgs))
+    inner = blob + dy._pb_v(2, echo_cursor) + dy._pb_v(3, has_more)
     return (dy._pb_v(1, 301) + dy._pb_b(4, "OK")
             + dy._pb_b(6, dy._pb_b(301, inner)))
 
 
-def test_parses_cursor_and_has_more():
-    resp = _fake_response(b"", 1672502430520000, 1)
+def test_next_cursor_is_the_oldest_message_in_the_page():
+    """往回翻：下一页从本页最老那条接着走。"""
+    resp = _fake_response([1672502638900000, 1672502638910000,
+                           1672502638920000], has_more=1)
     cursor, has_more = dy.parse_history_cursor(resp)
-    assert cursor == 1672502430520000
+
+    assert cursor == 1672502638900000
     assert has_more is True
 
 
+def test_outer_field2_is_not_the_cursor():
+    """f2 只是回显请求里的 cursor。拿它当 next_cursor 就会原地打转 ——
+    这正是「聊天记录只到某一天」的根因，别再回去了。"""
+    resp = _fake_response([1672502638900000], has_more=1, echo_cursor=42)
+    cursor, _ = dy.parse_history_cursor(resp)
+    assert cursor == 1672502638900000
+    assert cursor != 42
+
+
 def test_has_more_false_ends_paging():
-    cursor, has_more = dy.parse_history_cursor(_fake_response(b"", 123, 0))
+    resp = _fake_response([1672502638900000], has_more=0)
+    _cursor, has_more = dy.parse_history_cursor(resp)
     assert has_more is False
+
+
+def test_page_without_messages_ends_paging():
+    """有 has_more 却一条消息都没有 —— 算不出下一页从哪接，只能停。"""
+    cursor, has_more = dy.parse_history_cursor(_fake_response([], has_more=1))
+    assert (cursor, has_more) == (0, False)
 
 
 def test_missing_fields_stop_paging_safely():
@@ -153,11 +187,10 @@ class _FakeSession:
         return _FakeResp(self.pages.pop(0) if self.pages else b"")
 
 
-def _page(n_msgs: int, next_cursor: int, has_more: int) -> bytes:
-    blob = b"".join(dy._pb_b(1, dy._pb_b(1, f"m{i}")) for i in range(n_msgs))
-    inner = blob + dy._pb_v(2, next_cursor) + dy._pb_v(3, has_more)
-    return (dy._pb_v(1, 301) + dy._pb_b(4, "OK")
-            + dy._pb_b(6, dy._pb_b(301, inner)))
+def _page(n_msgs: int, oldest_cursor: int, has_more: int) -> bytes:
+    """一页 n 条消息，最老那条的 cursor = oldest_cursor（往回翻的接力点）。"""
+    return _fake_response([oldest_cursor + i * 10 for i in range(n_msgs)],
+                          has_more=has_more)
 
 
 def _fetch(session, **kw):
@@ -166,14 +199,15 @@ def _fetch(session, **kw):
                             conv_id="0:1:1:2", conv_short_id=123, **kw)
 
 
-def test_follows_cursor_across_pages(monkeypatch):
+def test_follows_cursor_backwards_across_pages(monkeypatch):
+    """一路往回翻：每页都从上一页最老那条接着走，cursor 递减。"""
     monkeypatch.setattr(dy, "parse_messages", lambda b, my_uid="": [{"x": 1}] * 3)
-    s = _FakeSession([_page(3, 200, 1), _page(3, 300, 1), _page(3, 400, 0)])
+    s = _FakeSession([_page(3, 900, 1), _page(3, 800, 1), _page(3, 700, 0)])
 
-    out = _fetch(s, start_cursor=100)
+    out = _fetch(s, start_cursor=1_000_000)
 
     assert s.calls == 3
-    assert s.cursors == [100, 200, 300], "没有把 next_cursor 带到下一页"
+    assert s.cursors == [1_000_000, 900, 800], "没有接着上一页最老那条往回翻"
     assert len(out) == 9
 
 
@@ -187,18 +221,30 @@ def test_stops_on_has_more_false(monkeypatch):
 def test_max_pages_is_a_hard_stop(monkeypatch):
     """抖音一直说 has_more 也得停 —— 防止死循环把接口打爆。"""
     monkeypatch.setattr(dy, "parse_messages", lambda b, my_uid="": [{"x": 1}])
-    # cursor 必须递增，否则会先撞上「游标不前进」那道刹车
-    s = _FakeSession([_page(1, 100 + i * 10, 1) for i in range(200)])
-    _fetch(s, start_cursor=1, max_pages=5)
+    # cursor 必须递减，否则会先撞上「游标不后退」那道刹车
+    s = _FakeSession([_page(1, 100_000 - i * 10, 1) for i in range(200)])
+    _fetch(s, start_cursor=1_000_000, max_pages=5)
     assert s.calls == 5
 
 
-def test_stops_when_cursor_does_not_advance(monkeypatch):
+def test_stops_when_cursor_does_not_go_back(monkeypatch):
     """游标原地不动 = 抖音在重复发同一页，再翻就是无限循环。"""
     monkeypatch.setattr(dy, "parse_messages", lambda b, my_uid="": [{"x": 1}])
     s = _FakeSession([_page(1, 100, 1) for _ in range(10)])
-    _fetch(s, start_cursor=100, max_pages=10)
-    assert s.calls <= 2, f"游标不前进却翻了 {s.calls} 页"
+    _fetch(s, start_cursor=1_000_000, max_pages=10)
+    assert s.calls <= 2, f"游标不后退却翻了 {s.calls} 页"
+
+
+def test_first_page_sentinel_does_not_trip_the_brake(monkeypatch):
+    """首页起点是个越界哨兵，和真 cursor 不在一个量级 —— 不能因为
+    「哨兵 < 第一页 cursor」就把翻页当成不后退给停了。"""
+    monkeypatch.setattr(dy, "parse_messages", lambda b, my_uid="": [{"x": 1}])
+    s = _FakeSession([_page(1, 1672502638900000, 1),
+                      _page(1, 1672502638400000, 0)])
+
+    _fetch(s, start_cursor=dy.HISTORY_EPOCH_CURSOR)
+
+    assert s.calls == 2, "首页哨兵把翻页误刹住了"
 
 
 def test_http_error_stops_without_raising(monkeypatch):
@@ -215,7 +261,7 @@ def test_empty_page_stops(monkeypatch):
     """解析不出消息就别再翻了，多半是响应结构变了。"""
     monkeypatch.setattr(dy, "parse_messages", lambda b, my_uid="": [])
     s = _FakeSession([_page(0, 200, 1), _page(1, 300, 1)])
-    _fetch(s, start_cursor=100)
+    _fetch(s, start_cursor=1_000_000)
     assert s.calls == 1
 
 

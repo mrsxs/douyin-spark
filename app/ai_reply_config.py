@@ -107,6 +107,22 @@ def save(db: Session, account_id: int, data: dict) -> AiReplyConfig:
 
     if "thinking" in data:
         row.thinking = bool(data.get("thinking"))
+    if "reply_share" in data:
+        row.reply_share = bool(data.get("reply_share"))
+    if "reply_voice" in data:
+        row.reply_voice = bool(data.get("reply_voice"))
+
+    if "asr_base_url" in data:
+        row.asr_base_url = (data.get("asr_base_url") or "").strip()[:255]
+    if "asr_model" in data:
+        row.asr_model = (data.get("asr_model") or "").strip()[:80]
+    # 和 api_key 同一套语义：空串 = 没动它，显式 null 才是清空
+    if "asr_api_key" in data:
+        key = data.get("asr_api_key")
+        if key is None:
+            row.asr_key_enc = ""
+        elif str(key).strip():
+            row.asr_key_enc = crypto.encrypt(str(key).strip())
 
     if "enabled" in data:
         want = bool(data.get("enabled"))
@@ -133,7 +149,8 @@ def to_public(row: AiReplyConfig | None) -> dict:
             "prompt_template": ai_reply.DEFAULT_PROMPT_TEMPLATE,
             "reply_format": ai_reply.DEFAULT_REPLY_FORMAT, "banned_words": "",
             "decline_policy": "", "fewshot": "",
-            "thinking": True,
+            "thinking": True, "reply_share": False, "reply_voice": False,
+            "asr_base_url": "", "asr_model": "", "has_asr_key": False,
             "max_chars": 60, "cooldown_sec": 20, "daily_limit": 100,
             "history_turns": 6, "poll_interval": 30,
         }
@@ -150,6 +167,12 @@ def to_public(row: AiReplyConfig | None) -> dict:
         "decline_policy": row.decline_policy or "",
         "fewshot": row.fewshot or "",
         "thinking": bool(row.thinking),
+        "reply_share": bool(row.reply_share),
+        "reply_voice": bool(row.reply_voice),
+        "asr_base_url": row.asr_base_url or "",
+        "asr_model": row.asr_model or "",
+        # 和 has_key 一样：只说配没配，永不回明文
+        "has_asr_key": bool(row.asr_key_enc),
         "max_chars": row.max_chars,
         "cooldown_sec": row.cooldown_sec,
         "daily_limit": row.daily_limit,
@@ -178,6 +201,10 @@ def api_key(row: AiReplyConfig | None) -> str:
     return crypto.decrypt(row.api_key_enc) if row and row.api_key_enc else ""
 
 
+def asr_api_key(row: AiReplyConfig | None) -> str:
+    return crypto.decrypt(row.asr_key_enc) if row and row.asr_key_enc else ""
+
+
 # ── 联系人级 ──────────────────────────────────────────────
 
 def get_peer(db: Session, account_id: int, uid: str) -> AiReplyPeer | None:
@@ -201,6 +228,14 @@ def set_peer(db: Session, account_id: int, uid: str, data: dict) -> AiReplyPeer:
     if "reply_format" in data:
         v = (data.get("reply_format") or "").strip()
         row.reply_format = v[:200] or None
+    # 三态：None = 继承账号级，True/False = 只对这个人生效。
+    # 前端传 null 表示"清空覆盖"
+    if "reply_share" in data:
+        v = data.get("reply_share")
+        row.reply_share = None if v is None else bool(v)
+    if "reply_voice" in data:
+        v = data.get("reply_voice")
+        row.reply_voice = None if v is None else bool(v)
     return row
 
 
@@ -217,7 +252,10 @@ def peer_map(db: Session, account_id: int) -> dict[str, dict]:
         AiReplyPeer.douyin_account_id == account_id)).all()
     return {r.uid: {"enabled": bool(r.enabled),
                     "persona": r.persona or "",
-                    "reply_format": r.reply_format or ""} for r in rows}
+                    "reply_format": r.reply_format or "",
+                    # None 要原样透出：前端要区分"继承"和"显式关掉"
+                    "reply_share": r.reply_share,
+                    "reply_voice": r.reply_voice} for r in rows}
 
 
 # ── 合并后的生效配置 ──────────────────────────────────────
@@ -237,6 +275,10 @@ class Effective:
     decline_policy: str = ""
     fewshot: str = ""
     thinking: bool = True
+    # 是否回复对方分享的视频（要多打一次抖音解析接口，默认关）
+    reply_share: bool = False
+    # 是否回复对方发的语音（要下载音频 + 调 ASR，默认关）
+    reply_voice: bool = False
 
     def policy(self) -> ai_reply.ReplyPolicy:
         return ai_reply.ReplyPolicy(
@@ -274,4 +316,10 @@ def resolve(cfg: AiReplyConfig, peer: AiReplyPeer | None) -> Effective:
         decline_policy=cfg.decline_policy or "",
         fewshot=cfg.fewshot or "",
         thinking=bool(cfg.thinking),
+        # 三态：联系人级 None 表示继承账号级，不能用 `or` 折叠 ——
+        # 那样联系人显式设的 False 会被账号级的 True 顶掉
+        reply_share=bool(cfg.reply_share) if (peer is None or peer.reply_share is None)
+                    else bool(peer.reply_share),
+        reply_voice=bool(cfg.reply_voice) if (peer is None or peer.reply_voice is None)
+                    else bool(peer.reply_voice),
     )

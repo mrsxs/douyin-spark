@@ -39,8 +39,8 @@ def fake_douyin(monkeypatch):
 
     monkeypatch.setattr(trigger, "_ensure_active",
                         lambda ctx: ({}, {}, [dict(c) for c in CONTACTS]))
-    monkeypatch.setattr(trigger, "_adaptive_interval",
-                        lambda account_id, base=5.0: (0.0, "test"))
+    monkeypatch.setattr(trigger, "send_interval_range",
+                        lambda account_id: (0.0, 0.0, "test"))
     monkeypatch.setattr(trigger.dy, "_log", lambda *a, **k: None)
     monkeypatch.setattr(trigger.dy, "get_last_send_info", lambda: {"msg": "OK"})
     monkeypatch.setattr(trigger.dy, "_pick_message",
@@ -201,8 +201,8 @@ def fake_with_recovering(monkeypatch):
     sent = []
     monkeypatch.setattr(trigger, "_ensure_active",
                         lambda ctx: ({}, {}, [dict(c) for c in CONTACTS] + [dict(RECOVER)]))
-    monkeypatch.setattr(trigger, "_adaptive_interval",
-                        lambda account_id, base=5.0: (0.0, "test"))
+    monkeypatch.setattr(trigger, "send_interval_range",
+                        lambda account_id: (0.0, 0.0, "test"))
     monkeypatch.setattr(trigger.dy, "_log", lambda *a, **k: None)
     monkeypatch.setattr(trigger.dy, "get_last_send_info", lambda: {"msg": "OK"})
     monkeypatch.setattr(trigger.dy, "_pick_message",

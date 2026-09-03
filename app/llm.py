@@ -58,6 +58,12 @@ class LLMConfig:
     # 见 _call_openai：同时决定要不要强制 JSON 输出
     thinking: bool = True
 
+    # 语音转写。独立于上面三项 —— 主网关常是 DeepSeek，它没有
+    # /audio/transcriptions。三项缺一即视为未启用（见 transcribe）。
+    asr_base_url: str = ""
+    asr_model: str = ""
+    asr_api_key: str = ""
+
 
 @dataclass(frozen=True)
 class LLMResult:
@@ -249,6 +255,75 @@ def _raise_if_truncated(finish_reason: str | None, max_tokens: int,
     raise LLMError(
         f"输出被 max_tokens={max_tokens} 截断{extra}，没留下正文。"
         f"这个模型会思考，思考过程也算在 max_tokens 里，请调大它。")
+
+
+# ── 语音转文字（OpenAI 兼容 /audio/transcriptions）─────────
+#
+# 抖音的 IM 语音不带转写，只能自己接。走 OpenAI 的
+# /audio/transcriptions 形状 —— 硅基流动、Groq、OpenAI、本地
+# whisper.cpp server 都认这个，用户换供应商不用改代码。
+#
+# 独立于主网关配置：主网关默认是 DeepSeek，它没有这个接口。
+# 三项（base_url / model / key）缺一就是没启用，静默不转写。
+
+# 转写文本会写回 ChatMessage.media.asr，而那个字段整体有
+# 2000 字节上限（见 messages_service._MEDIA_MAX）。中文一字 3 字节，
+# 加上 src / wave 已占的部分，300 字是安全线。
+ASR_TEXT_MAX = 300
+_ASR_TIMEOUT = 60
+
+
+def asr_endpoint(base_url: str) -> str:
+    """和 openai_endpoint 一样容忍 base_url 的三种写法。"""
+    b = (base_url or "").strip().rstrip("/")
+    if not b:
+        return ""
+    if b.endswith("/audio/transcriptions"):
+        return b
+    if not b.endswith("/v1") and "/v1/" not in b:
+        b += "/v1"
+    return b + "/audio/transcriptions"
+
+
+def transcribe(cfg, audio: bytes, filename: str = "voice.mp3") -> str:
+    """把一段语音转成文字。没配全 ASR 或没音频时返回 ""。
+
+    出错抛 LLMError（和 chat 一致），由调用方决定是重试还是放弃。
+    """
+    url = asr_endpoint(getattr(cfg, "asr_base_url", ""))
+    model = (getattr(cfg, "asr_model", "") or "").strip()
+    key = (getattr(cfg, "asr_api_key", "") or "").strip()
+    if not (url and model and key and audio):
+        return ""
+
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {key}"},
+            files={"file": (filename, audio, "audio/mpeg")},
+            data={"model": model},
+            timeout=_ASR_TIMEOUT,
+        )
+    except requests.Timeout:
+        raise LLMError(f"语音转写超时（{_ASR_TIMEOUT}s）")
+    except requests.RequestException as e:
+        raise LLMError(f"语音转写网络错误: {type(e).__name__}")
+
+    if resp.status_code != 200:
+        raise LLMError(f"语音转写 HTTP {resp.status_code}: {_clip(resp.text)}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise LLMError(f"语音转写响应不是 JSON: {_clip(resp.text)}")
+
+    # 多数网关回 {"text": ...}，少数回 {"result": ...}
+    raw = data.get("text") if isinstance(data, dict) else ""
+    if not isinstance(raw, str) or not raw.strip():
+        raw = data.get("result") if isinstance(data, dict) else ""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if len(text) > ASR_TEXT_MAX:
+        text = text[:ASR_TEXT_MAX] + "…"
+    return text
 
 
 # ── 共用 ─────────────────────────────────────────────────

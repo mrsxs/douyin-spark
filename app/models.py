@@ -3,7 +3,7 @@ ORM 模型：User / LicenseCode / DouyinAccount / Schedule / AuditLog
 """
 from datetime import datetime
 from sqlalchemy import (
-    BigInteger, Integer, String, Boolean, DateTime, Text, ForeignKey,
+    BigInteger, Integer, Float, String, Boolean, DateTime, Text, ForeignKey,
     UniqueConstraint, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -91,6 +91,13 @@ class Schedule(Base):
     send_to_no_spark:  Mapped[bool]  = mapped_column(Boolean, default=False)
     last_ran_date:     Mapped[str | None] = mapped_column(String(10), nullable=True)
     last_result:       Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 两条消息之间的间隔，秒。用户自己调 —— 3 秒对老号可能过快，
+    # 20 秒对小号又太磨叽，合适的节奏只有用号的人知道。
+    # 默认 4.5~5.5 复刻改这个功能之前的 `5.0 ± random(-0.5, 0.5)`，
+    # 升级不该悄悄改变谁的发送节奏。风控降速倍数在这个区间之上叠加。
+    send_min_sec:      Mapped[float] = mapped_column(Float, default=4.5)
+    send_max_sec:      Mapped[float] = mapped_column(Float, default=5.5)
 
     account: Mapped["DouyinAccount"] = relationship(back_populates="schedule")
 
@@ -240,6 +247,44 @@ class ChatMessage(Base):
     )
 
 
+class VideoParse(Base):
+    """分享视频的解析结果 —— **全局缓存，刻意不挂 account_id**。
+
+    同一个视频谁分享都是同一份内容，按账号分表存等于把同一份东西
+    重复问抖音 N 次。这是给真人号新增的一类请求，省下的每一次都是风控额度。
+
+    只在 AI 真要回复某条分享视频时才写（懒解析）；聊天页浏览不触发。
+    结果不放进 ChatMessage.media —— 那个字段有 2000 字节硬上限。
+    """
+    __tablename__ = "video_parses"
+
+    id:          Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 抖音的 item_id，19 位左右的雪花 id
+    aweme_id:    Mapped[str] = mapped_column(String(24), unique=True, index=True)
+
+    # "ok"（有内容）| "failed"（拉不到，短期内不重试）
+    status:      Mapped[str] = mapped_column(String(16), default="ok")
+    err:         Mapped[str] = mapped_column(String(200), default="")
+
+    desc_text:   Mapped[str] = mapped_column(Text, default="")      # 作者写的文案
+    title:       Mapped[str] = mapped_column(String(200), default="")
+    # 抖音自己生成的内容总结（AI抖音「视频总结」），是喂给 AI 的主要素材
+    summary:     Mapped[str] = mapped_column(Text, default="")
+    author_nick: Mapped[str] = mapped_column(String(80), default="")
+    author_sec:  Mapped[str] = mapped_column(String(120), default="")
+    music:       Mapped[str] = mapped_column(String(120), default="")
+    cover_url:   Mapped[str] = mapped_column(Text, default="")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    create_time: Mapped[int] = mapped_column(Integer, default=0)    # 抖音的发布秒级时间戳
+    tags:        Mapped[str] = mapped_column(Text, default="[]")    # JSON: 话题标签
+    categories:  Mapped[str] = mapped_column(Text, default="[]")    # JSON: 抖音打的三级内容分类
+    stats:       Mapped[str] = mapped_column(Text, default="{}")    # JSON: 点赞/评论/转发/收藏
+
+    parsed_at:   Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                  onupdate=datetime.utcnow)
+
+
 class AppSetting(Base):
     """通用系统配置 KV 表（SMTP、公共开关等）"""
     __tablename__ = "app_settings"
@@ -315,6 +360,18 @@ class AiReplyConfig(Base):
     poll_interval: Mapped[int] = mapped_column(Integer, default=30)
     # 用户自定义禁词，逗号分隔。命中即不发
     banned_words: Mapped[str] = mapped_column(Text, default="")
+    # 是否回复对方分享的视频。默认关：回复分享要先去抖音解析视频，
+    # 那是给真人号新增的一类请求，得让用户显式点头才花这个风控额度。
+    reply_share:  Mapped[bool] = mapped_column(Boolean, default=False)
+    # 是否回复对方发的语音。默认关，且要先配好 ASR 才有意义 ——
+    # 抖音的 IM 语音不带转写，不转成文字模型就只看得到「[语音] 3.2″」
+    reply_voice:  Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # 语音转写（OpenAI 兼容 /audio/transcriptions）。独立于主网关：
+    # 主网关常是 DeepSeek，它没有这个接口。三项缺一即视为未启用。
+    asr_base_url: Mapped[str] = mapped_column(String(255), default="")
+    asr_model:    Mapped[str] = mapped_column(String(80), default="")
+    asr_key_enc:  Mapped[str] = mapped_column(Text, default="")
 
     # 连续失败计数，达阈值自动关开关 + 站内通知，不无限烧钱
     fail_streak:  Mapped[int] = mapped_column(Integer, default=0)
@@ -340,6 +397,11 @@ class AiReplyPeer(Base):
     enabled:      Mapped[bool] = mapped_column(Boolean, default=False)
     persona:      Mapped[str | None] = mapped_column(Text, nullable=True)
     reply_format: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL = 跟随账号级 reply_share；True/False = 只对这个人生效
+    # （「对客户回视频、对朋友不回」）
+    reply_share:  Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 同上，针对语音
+    reply_voice:  Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     updated_at:   Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("douyin_account_id", "uid", name="uq_aipeer_uid"),)

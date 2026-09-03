@@ -125,7 +125,11 @@ def save_peer(account_id: int, uid: str, payload: dict = Body(...),
         db.commit()
         return {"ok": True, "peer": {"enabled": bool(row.enabled),
                                      "persona": row.persona or "",
-                                     "reply_format": row.reply_format or ""}}
+                                     "reply_format": row.reply_format or "",
+                                     # None 要原样回：前端靠它区分
+                                     # 「跟随账号级」和「显式关掉」
+                                     "reply_share": row.reply_share,
+                                     "reply_voice": row.reply_voice}}
     except Exception as e:
         db.rollback()
         traceback.print_exc()

@@ -62,12 +62,55 @@ def account_lock(account_id: int):
             lock.release()
 
 
-def _adaptive_interval(account_id: int, base: float = 5.0) -> tuple[float, str]:
-    """基于最近 3 次 auto 任务的失败率，返回发送间隔 + 提示文字。
+# 发送间隔的默认区间（秒）。4.5~5.5 是刻意的：这个功能之前的行为就是
+# `5.0 ± random(-0.5, 0.5)`，默认值原样复刻它 —— 升级不该悄悄改快或改慢
+# 谁的发送节奏。用户在账号页可以自己调。
+SEND_MIN_DEFAULT = 4.5
+SEND_MAX_DEFAULT = 5.5
 
-    - 失败率 <20%：base 秒（正常）
-    - 20%-50%：3x base（有些慢）
-    - >=50%：12x base（严重降速，避免持续触发风控）
+# 用户能设的边界。低于 1 秒等于连发，风控当场就找上门；
+# 高于 5 分钟一条，一百个联系人要跑到天亮，多半是填错了。
+SEND_MIN_FLOOR = 1.0
+SEND_MAX_CEIL = 300.0
+
+
+def _configured_range(account_id: int) -> tuple[float, float]:
+    """读这个账号设的间隔区间；库里的值不可信就退回默认。
+
+    Why 要兜底：老行没有这两列（迁移给的是默认值，但手改过 DB 的、
+    或者 NULL 的都可能进来）。宁可退回默认，也不能按 0 秒连发。
+    """
+    with SessionLocal() as db:
+        sch = (db.query(Schedule)
+                 .filter(Schedule.douyin_account_id == account_id).first())
+        lo = getattr(sch, "send_min_sec", None) if sch else None
+        hi = getattr(sch, "send_max_sec", None) if sch else None
+    try:
+        lo, hi = float(lo), float(hi)
+    except (TypeError, ValueError):
+        return SEND_MIN_DEFAULT, SEND_MAX_DEFAULT
+    if lo < SEND_MIN_FLOOR or hi < lo:
+        return SEND_MIN_DEFAULT, SEND_MAX_DEFAULT
+    return lo, min(hi, SEND_MAX_CEIL)
+
+
+def send_interval_range(account_id: int) -> tuple[float, float, str]:
+    """这个账号这一轮该用的间隔区间 + 风险提示。
+
+    用户设的是**基准区间**，风控降速倍数在它之上叠加 —— 连续失败说明
+    已经被盯上了，这时候还按用户设的快节奏发，是把号往里送。
+    """
+    lo, hi = _configured_range(account_id)
+    mult, risk = _risk_multiplier(account_id)
+    return lo * mult, hi * mult, risk
+
+
+def _risk_multiplier(account_id: int) -> tuple[float, str]:
+    """基于最近 3 次 auto 任务的失败率，返回降速倍数 + 提示文字。
+
+    - 失败率 <20%：1x（正常）
+    - 20%-50%：3x（有些慢）
+    - >=50%：12x（严重降速，避免持续触发风控）
     """
     with SessionLocal() as db:
         recent = (db.query(JobRun)
@@ -80,13 +123,37 @@ def _adaptive_interval(account_id: int, base: float = 5.0) -> tuple[float, str]:
     total_failed = sum(r.failed for r in recent)
     denom = total_sent + total_failed
     if denom == 0:
-        return base, "normal"
+        return 1.0, "normal"
     rate = total_failed / denom
     if rate >= 0.5:
-        return base * 12, f"high_risk ({int(rate*100)}% fail)"
+        return 12.0, f"high_risk ({int(rate*100)}% fail)"
     if rate >= 0.2:
-        return base * 3, f"medium_risk ({int(rate*100)}% fail)"
-    return base, "normal"
+        return 3.0, f"medium_risk ({int(rate*100)}% fail)"
+    return 1.0, "normal"
+
+
+# init 里的 IM 握手（init_req.bin）是登录时抓下来的，会过期。过期后
+# 抖音回 HTTP 200 + 一个几十字节的错误信封，正文写着 unexepcted session length
+# （它自己的拼写）。只有重新登录才能换一份 —— 所以这里要把话说到位。
+_INIT_STALE_HINTS = ("session length", "unexpected token", "crc32")
+
+
+def _init_failure(resp) -> str:
+    """把 init 的失败翻成人话。
+
+    Why 不直接报 HTTP 码：这条路失败时 HTTP 依然是 200，错误藏在 protobuf 里。
+    只报「HTTP 200」等于把唯一的线索丢掉，排查得手工解包才看得见。
+    """
+    if resp.status_code != 200:
+        return f"get_message_by_init 失败: HTTP {resp.status_code}"
+    err = dy.init_error(resp.content)
+    if err and any(h in err for h in _INIT_STALE_HINTS):
+        return (f"IM 会话已失效（抖音: {err}），请重新登录这个账号 —— "
+                f"登录时会重新抓一份握手数据")
+    if err:
+        return f"get_message_by_init 被拒: {err}"
+    return (f"get_message_by_init 返回异常（只有 {len(resp.content)} 字节，"
+            f"正常是 1MB 以上）")
 
 
 def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
@@ -110,8 +177,8 @@ def _ensure_active(ctx: AccountCtx) -> tuple[dict, list[dict]]:
         headers={**dy.HEADERS, "Content-Type": "application/x-protobuf"},
         timeout=30,
     )
-    if resp.status_code != 200 or len(resp.content) < 1024:
-        raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
+    if resp.status_code != 200 or len(resp.content) < dy.INIT_MIN_BYTES:
+        raise NotReady(_init_failure(resp))
     # include_all：连一条火花标记都没有的普通好友也带出来（status="none"）。
     # 用户要「不管有没有火花都能选」，那些人只能从这条路进联系人列表；
     # 是否真给他们发消息，由 Schedule.send_to_broken 决定，和这里无关。
@@ -200,8 +267,8 @@ def poll_new_messages(user_id: int, account_id: int) -> list[dict]:
         headers={**dy.HEADERS, "Content-Type": "application/x-protobuf"},
         timeout=15,
     )
-    if resp.status_code != 200 or len(resp.content) < 1024:
-        raise NotReady(f"get_message_by_init 失败: HTTP {resp.status_code}")
+    if resp.status_code != 200 or len(resp.content) < dy.INIT_MIN_BYTES:
+        raise NotReady(_init_failure(resp))
 
     my_uid = dy.extract_my_uid(resp.content)
     msgs = dy.parse_messages(resp.content, my_uid=my_uid)
@@ -243,8 +310,16 @@ def _resolve_my_uid(conv_id: str, peer_uid: str, account_dy_uid: str | None) -> 
     return str(account_dy_uid or "")
 
 
+# 一页 50 条。默认 40 页 ≈ 2000 条，够把一个热聊会话补回两个来月。
+BACKFILL_PAGES = 40
+
+# 硬上限。每页之间要 sleep 0.8s，200 页就是 200 个请求 + 三分钟 ——
+# 再往上翻，风控代价比补回来的记录值钱。
+BACKFILL_PAGES_MAX = 200
+
+
 def backfill_history(user_id: int, account_id: int, uid: str,
-                     max_pages: int = 40) -> dict:
+                     max_pages: int = BACKFILL_PAGES) -> dict:
     """把一个会话的历史消息从抖音云端拉回来，补进冷备表。
 
     Why: get_message_by_init 每个会话只回最近 ~21 条，两次同步之间聊得多一点，
@@ -304,7 +379,8 @@ def backfill_history(user_id: int, account_id: int, uid: str,
             "nickname": nickname}
 
 
-def backfill_all(user_id: int, account_id: int, max_pages: int = 40) -> dict:
+def backfill_all(user_id: int, account_id: int,
+                 max_pages: int = BACKFILL_PAGES) -> dict:
     """回填整个账号所有会话的历史。
 
     逐个会话串行跑，单个失败不影响其它 —— 回填一次要打几十上百个请求，
@@ -416,8 +492,8 @@ def _send_batch_locked(user_id: int, account_id: int, uids: list[str],
     by_uid = {c["uid"]: c for c in contacts}
 
     results, sent, failed = [], 0, 0
-    interval, risk = _adaptive_interval(account_id, base=5.0)
-    dy._log(f"[batch] send interval = {interval}s ({risk})", "RATE")
+    lo, hi, risk = send_interval_range(account_id)
+    dy._log(f"[batch] send interval = {lo:.1f}~{hi:.1f}s ({risk})", "RATE")
 
     for i, uid in enumerate(uids):
         c = by_uid.get(str(uid))
@@ -427,7 +503,7 @@ def _send_batch_locked(user_id: int, account_id: int, uids: list[str],
             _write_item(run_id, str(uid), None, None, text, False, "联系人不存在")
             continue
         if i > 0:
-            time.sleep(interval + random.uniform(-0.5, 0.5))
+            time.sleep(random.uniform(lo, hi))
         try:
             ok = bool(dy.send_text(session, c["conv_id"], text, c, constants))
             detail = format_send_detail(dy.get_last_send_info())
@@ -620,8 +696,8 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
     except Exception as _e:
         print(f"[auto] 回填 total 失败: {_e}")
     # 基于近期失败率自适应限速；随机 ±0.5s jitter 更像人工操作
-    SEND_INTERVAL, _risk_level = _adaptive_interval(account_id, base=5.0)
-    dy._log(f"[auto] send interval = {SEND_INTERVAL}s ({_risk_level})", "RATE")
+    _lo, _hi, _risk_level = send_interval_range(account_id)
+    dy._log(f"[auto] send interval = {_lo:.1f}~{_hi:.1f}s ({_risk_level})", "RATE")
     # 连续失败熔断：连续 5 次失败则停当前任务
     consecutive_fail = 0
     for i, c in enumerate(contacts):
@@ -631,7 +707,7 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
             # skipped 联系人不入明细（量太大会影响 DB 体积）
             continue
         if i > 0:
-            time.sleep(SEND_INTERVAL + random.uniform(-0.5, 0.5))
+            time.sleep(random.uniform(_lo, _hi))
         item_ok = False
         item_detail = ""
         try:
@@ -685,7 +761,8 @@ def _auto_run_locked(user_id: int, account_id: int, triggered_by: str,
             break
 
     summary = {"sent": sent, "skipped": skipped, "failed": failed,
-               "risk": _risk_level, "interval": SEND_INTERVAL}
+               "risk": _risk_level, "interval": round((_lo + _hi) / 2, 1),
+               "interval_min": round(_lo, 1), "interval_max": round(_hi, 1)}
     dy._log(f"[auto] DONE {summary}", "DONE")
 
     # 更新 JobRun + 原有 DB 记录 + 失败时发站内通知

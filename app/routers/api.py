@@ -16,7 +16,8 @@ from ..db import get_db, SessionLocal
 from ..models import DouyinAccount, Schedule, AuditLog, Announcement, JobRun, JobRunItem, Notification
 from ..deps import require_active
 from ..storage import AccountCtx, set_account_ctx
-from .. import trigger, jobs, contacts_service, messages_service, realtime
+from .. import (trigger, jobs, contacts_service, messages_service, realtime,
+                ai_reply_config, llm, voice_service, video_service)
 import douyin_im as dy
 
 router = APIRouter(prefix="/api")
@@ -205,6 +206,137 @@ def api_messages_sync(
         return {"ok": False, "error": _safe_err(e)}
 
 
+def _account_session_for(user_id: int, account_id: int):
+    """拿这个账号的登录态 session。抖音协议只在 douyin_im.py，这里只切上下文。"""
+    set_account_ctx(AccountCtx(user_id=user_id, account_id=account_id))
+    return dy._load_session()
+
+
+@router.post("/messages/{account_id}/transcribe")
+def api_messages_transcribe(
+    account_id: int,
+    payload: dict = Body(default={}),
+    user = Depends(require_active),
+    db: Session = Depends(get_db),
+):
+    """把一条语音转成文字。payload: {id: int} —— **本地行 id，不是 server_msg_id**。
+
+    Why 要有手动入口：自动转写只在 AI 准备回复时才发生，用户自己翻记录
+    看到语音就只能听。转写结果写回 media.asr，点一次之后谁都受益
+    （AI 后面要回也直接命中缓存，不重复计费）。
+
+    Why 用本地 id：抖音的 server_message_id 是 19 位雪花号，全部超出 JS 的
+    Number.MAX_SAFE_INTEGER，一进浏览器就被四舍五入，发回来已经不是原值。
+    """
+    acc = db.query(DouyinAccount).filter(
+        DouyinAccount.id == account_id,
+        DouyinAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(404, "账户不存在")
+
+    try:
+        msg_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "缺少消息 id"}
+    if msg_id <= 0:
+        return {"ok": False, "error": "缺少消息 id"}
+
+    msg = messages_service.get_message(db, acc.id, msg_id)
+    if msg is None:
+        return {"ok": False, "error": "消息不存在"}
+    if msg.get("kind") != "audio":
+        return {"ok": False, "error": "这条不是语音消息"}
+
+    cfg = ai_reply_config.load(db, acc.id)
+    asr_cfg = llm.LLMConfig(
+        asr_base_url=(cfg.asr_base_url if cfg else "") or "",
+        asr_model=(cfg.asr_model if cfg else "") or "",
+        asr_api_key=ai_reply_config.asr_api_key(cfg),
+    )
+    # 先给一句人话，别让用户对着「转写失败」猜是没配还是服务挂了
+    if not (asr_cfg.asr_base_url and asr_cfg.asr_model and asr_cfg.asr_api_key):
+        return {"ok": False, "error": "尚未配置语音转写服务，请在 AI 面板里填好"}
+
+    try:
+        session = _account_session_for(user.id, acc.id)
+        if session is None:
+            return {"ok": False, "error": "账号未登录，无法下载语音"}
+        text = voice_service.transcribe_message(session, asr_cfg, acc.id, msg)
+    except Exception as e:
+        traceback.print_exc()
+        return {"ok": False, "error": _safe_err(e)}
+
+    if not text:
+        return {"ok": False, "error": "没转出内容（可能是纯环境音或音频已过期）"}
+    return {"ok": True, "text": text}
+
+
+@router.get("/videos/{account_id}/{aweme_id}/stream")
+def api_video_stream(
+    account_id: int,
+    aweme_id: str,
+    request: Request,
+    user = Depends(require_active),
+):
+    """把分享的视频反代给聊天页的 <video>，让它在气泡里原生播放。
+
+    Why 不把直链甩给浏览器：直链带时效签名（约两天）、CDN 认 Referer，
+    而且一旦进了 HTML，用户随手一复制就把只有登录态才看得到的内容散出去了。
+    走自己的端点，鉴权和归属校验就都还在。
+
+    Range 透传是必须的：不支持 206 的话进度条拖不动，Safari 干脆不播。
+
+    刻意不用 Depends(get_db)：StreamingResponse 会把依赖一直持有到流结束，
+    那样一条视频从头看到尾就占住一个 DB 连接（和 SSE 那条一样的坑）。
+    归属校验用一次性短会话做完就放掉。
+    """
+    with SessionLocal() as db:
+        acc = db.query(DouyinAccount).filter(
+            DouyinAccount.id == account_id,
+            DouyinAccount.user_id == user.id).first()
+        if not acc:
+            raise HTTPException(404, "账户不存在")
+        acc_id = acc.id
+
+    vid = dy.extract_aweme_id(aweme_id)
+    if not vid:
+        raise HTTPException(404, "视频不存在")
+
+    session = _account_session_for(user.id, acc_id)
+    if session is None:
+        raise HTTPException(409, "账号未登录，无法取播放地址")
+
+    url = video_service.play_url(session, vid)
+    if not url:
+        raise HTTPException(404, "拿不到播放地址（视频可能已删除或仅粉丝可见）")
+
+    upstream = dy.open_video_stream(session, url, request.headers.get("range"))
+    if upstream is None:
+        raise HTTPException(502, "视频源暂时不可用")
+
+    def _pump():
+        try:
+            for chunk in upstream.iter_content(chunk_size=dy.VIDEO_CHUNK):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()          # 用户关页面/切走时也要收摊
+
+    # 只转发播放必需的头。上游其它头（含 Set-Cookie）一律不带过来
+    passthru = {}
+    for k in ("Content-Length", "Content-Range"):
+        v = upstream.headers.get(k)
+        if v:
+            passthru[k] = v
+    passthru["Accept-Ranges"] = "bytes"
+    # 不设 Cache-Control：NoStoreMiddleware 对非 /static/ 一律改写成 no-store
+    # （线上 CDN 不按 Cookie 区分，缓存过登录页面出过事故）。写了也是死代码。
+
+    return StreamingResponse(
+        _pump(), status_code=upstream.status_code, headers=passthru,
+        media_type=upstream.headers.get("Content-Type") or "video/mp4")
+
+
 @router.post("/messages/{account_id}/backfill")
 def api_messages_backfill(
     account_id: int,
@@ -226,13 +358,24 @@ def api_messages_backfill(
         raise HTTPException(404, "账户不存在")
 
     uid = str((payload or {}).get("uid") or "").strip()
+    # pages: 一页 50 条，默认 40 页 ≈ 2000 条。想翻得更早就加大 ——
+    # 每页之间还要 sleep，翻页越多打的请求越多，所以给个硬上限。
+    try:
+        pages = int((payload or {}).get("pages") or trigger.BACKFILL_PAGES)
+    except (TypeError, ValueError):
+        pages = trigger.BACKFILL_PAGES
+    if pages <= 0:                     # 0/负数按「没填」处理：翻 1 页等于白跑一趟
+        pages = trigger.BACKFILL_PAGES
+    pages = min(pages, trigger.BACKFILL_PAGES_MAX)
+
     try:
         if uid:
-            r = trigger.backfill_history(user.id, acc.id, uid)
+            r = trigger.backfill_history(user.id, acc.id, uid, max_pages=pages)
             if r.get("error"):
                 return {"ok": False, "error": r["error"]}
             return {"ok": True, **r}
-        return {"ok": True, **trigger.backfill_all(user.id, acc.id)}
+        return {"ok": True, **trigger.backfill_all(user.id, acc.id,
+                                                   max_pages=pages)}
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": _safe_err(e)}
@@ -552,6 +695,29 @@ def api_bulk_template_enabled(
         return {"ok": False, "error": _safe_err(e)}
 
 
+def _parse_send_range(payload: dict, cur_lo: float, cur_hi: float):
+    """校验发送间隔区间。合法返回 (min, max)，不合法返回给用户看的原因字符串。
+
+    Why 要说人话：这个值直接决定发消息的节奏，填错了要么被风控、
+    要么跑到天亮。只回一句「参数错误」，用户根本不知道该改哪个。
+
+    Why 缺的那一边取库里现有值而不是模块默认：只传了 send_max_sec 的客户端，
+    另一边会被悄悄改回 4.5 —— 用户没动过的设置不该因为别人少传一个字段就变了。
+    """
+    try:
+        lo = float(payload.get("send_min_sec", cur_lo))
+        hi = float(payload.get("send_max_sec", cur_hi))
+    except (TypeError, ValueError):
+        return "间隔要填数字（秒）"
+    if lo < trigger.SEND_MIN_FLOOR:
+        return f"最小间隔太快了，不能少于 {trigger.SEND_MIN_FLOOR:g} 秒"
+    if hi > trigger.SEND_MAX_CEIL:
+        return f"最大间隔太慢了，不能超过 {trigger.SEND_MAX_CEIL:g} 秒"
+    if lo > hi:
+        return "最小间隔不能大于最大间隔"
+    return lo, hi
+
+
 @router.get("/schedule/{account_id}")
 def api_get_schedule(account_id: int, user=Depends(require_active), db: Session = Depends(get_db)):
     acc = db.query(DouyinAccount).filter(
@@ -562,10 +728,14 @@ def api_get_schedule(account_id: int, user=Depends(require_active), db: Session 
     if not sch:
         # 和 Schedule 的列默认值保持一致，别让「还没建行」看起来像另一套行为
         return {"ok": True, "enabled": False, "time": "09:00",
-                "send_to_broken": True, "send_to_no_spark": False}
+                "send_to_broken": True, "send_to_no_spark": False,
+                "send_min_sec": trigger.SEND_MIN_DEFAULT,
+                "send_max_sec": trigger.SEND_MAX_DEFAULT}
+    lo, hi = trigger._configured_range(acc.id)
     return {"ok": True, "enabled": sch.enabled, "time": sch.time_hhmm,
             "send_to_broken": bool(sch.send_to_broken),
-            "send_to_no_spark": bool(sch.send_to_no_spark)}
+            "send_to_no_spark": bool(sch.send_to_no_spark),
+            "send_min_sec": lo, "send_max_sec": hi}
 
 
 @router.put("/schedule/{account_id}")
@@ -586,10 +756,19 @@ def api_set_schedule(
         assert 0 <= int(hh) < 24 and 0 <= int(mm) < 60
     except Exception:
         return {"ok": False, "error": "时间格式 HH:MM"}
+    # 间隔区间：两个都给了才动它。缺字段时保持原值 ——
+    # 老前端不带这俩，不能把用户设过的节奏悄悄改回默认
     sch = db.query(Schedule).filter(Schedule.douyin_account_id == acc.id).first()
     if not sch:
         sch = Schedule(douyin_account_id=acc.id)
         db.add(sch)
+
+    if "send_min_sec" in payload or "send_max_sec" in payload:
+        cur_lo, cur_hi = trigger._configured_range(acc.id)
+        span = _parse_send_range(payload, cur_lo, cur_hi)
+        if isinstance(span, str):
+            return {"ok": False, "error": span}
+        sch.send_min_sec, sch.send_max_sec = span
     # 改了发送时间 → 清空"今日已跑"标记，让新时间点还能触发
     if sch.time_hhmm != t:
         sch.last_ran_date = None

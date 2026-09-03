@@ -317,3 +317,40 @@ def test_backfill_fixes_wrong_is_me_on_existing_rows(db, acc, monkeypatch):
     row = db.query(ChatMessage).filter(ChatMessage.server_msg_id == 1).first()
     db.refresh(row)
     assert row.is_me is True, "重跑回填没能纠正躺错边的历史"
+
+
+# ── 翻页深度 ─────────────────────────────────────────────────────
+# 一页 50 条。默认 40 页只补得回两个来月，热聊会话想翻到更早得能加大；
+# 但每页之间还要 sleep，页数越多请求越多，所以要有硬上限。
+
+def test_default_page_depth_is_passed_down(db, acc, login, fake):
+    u, a = acc
+    _post(login(u), f"/api/messages/{a.id}/backfill", {"uid": "111"})
+    assert fake["fetch"][0]["max_pages"] == trigger.BACKFILL_PAGES
+
+
+def test_caller_can_ask_for_more_pages(db, acc, login, fake):
+    u, a = acc
+    _post(login(u), f"/api/messages/{a.id}/backfill",
+          {"uid": "111", "pages": 120})
+    assert fake["fetch"][0]["max_pages"] == 120
+
+
+@pytest.mark.parametrize("pages,expected", [
+    (99999, trigger.BACKFILL_PAGES_MAX),      # 封顶
+    (0, trigger.BACKFILL_PAGES),              # 翻 1 页等于白跑，当没填
+    (-5, trigger.BACKFILL_PAGES),
+    ("abc", trigger.BACKFILL_PAGES),          # 坏值退回默认，不报错
+    (None, trigger.BACKFILL_PAGES),
+])
+def test_page_depth_is_clamped(db, acc, login, fake, pages, expected):
+    u, a = acc
+    _post(login(u), f"/api/messages/{a.id}/backfill",
+          {"uid": "111", "pages": pages})
+    assert fake["fetch"][0]["max_pages"] == expected
+
+
+def test_whole_account_backfill_also_honors_pages(db, acc, login, fake):
+    u, a = acc
+    _post(login(u), f"/api/messages/{a.id}/backfill", {"pages": 80})
+    assert fake["fetch"][0]["max_pages"] == 80

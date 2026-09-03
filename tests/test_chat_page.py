@@ -162,12 +162,44 @@ def test_video_media_reaches_the_page(active_user, login):
     assert "p26.douyinpic.com/cover.webp" in body, "封面没传到前端"
 
 
-def test_player_uses_official_embed(active_user, login):
-    """用抖音官方 iframe 播放器：真实播放地址带时效签名，存下来很快 403。"""
+def test_player_is_native_and_inline(active_user, login):
+    """就在气泡里原生播，不再开弹窗、不再用官方 iframe。
+
+    直链走自己的反代：抖音的播放地址带时效签名又认 Referer，
+    塞进页面既会过期又等于把只有登录态才看得到的内容散出去。
+    """
     user, acc = active_user
     _seed_video(acc.id)
     body = login(user).get(f"/accounts/{acc.id}/chat?uid=333").text
-    assert "open.douyin.com/player/video" in body
+
+    assert "<video" in body
+    assert f"/api/videos/{acc.id}/" in body
+    assert "open.douyin.com/player/video" not in body, "官方 iframe 应该已经退场"
+    assert "douyinvod.com" not in body, "直链绝不能进页面"
+
+
+def test_video_poster_has_a_fallback(active_user, login):
+    """<video poster> 没有 error 事件，签名封面过期就只剩一块死黑。
+
+    图片走 onCoverError 回退到去签名版，视频这条路得自己探。
+    """
+    user, acc = active_user
+    _seed_video(acc.id)
+    body = login(user).get(f"/accounts/{acc.id}/chat?uid=333").text
+
+    assert "probeVideoPoster" in body
+    assert "cover_alt" in body, "回退地址没传到前端，探了也没得换"
+
+
+def test_video_is_not_preloaded(active_user, login):
+    """preload=none：不点就一个字节都不拉。
+
+    一屏几十条视频，预加载能把流量和抖音那边的请求量一起打爆。
+    """
+    user, acc = active_user
+    _seed_video(acc.id)
+    body = login(user).get(f"/accounts/{acc.id}/chat?uid=333").text
+    assert 'preload="none"' in body
 
 
 def test_cover_url_is_escaped_in_page(active_user, login):

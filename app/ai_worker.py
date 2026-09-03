@@ -27,7 +27,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from . import ai_reply, ai_reply_config, knowledge_service, llm, messages_service
+from . import (ai_reply, ai_reply_config, knowledge_service, llm,
+               messages_service, video_service, voice_service)
 from .db import SessionLocal
 from .models import AiReplyConfig, AiReplyLog, Contact, DouyinAccount, User
 
@@ -74,16 +75,52 @@ def on_new_messages(user_id: int, account_id: int, messages: list[dict]) -> int:
     return n
 
 
-def _is_candidate(m: dict) -> bool:
-    """只回对方发来的纯文本。
+def _aweme_id_of(m: dict) -> str:
+    """取这条分享消息的视频 id：先看 media.vid，认不出再从正文里提链接。
 
-    图片/语音/分享/系统消息一律不回：模型看不到内容，只能瞎猜，
-    回出来的东西必然驴唇不对马嘴。自己发的更不能回 —— 那是自问自答死循环。
+    Why 要有第二条路：抖音有些分享消息只给链接不给 item_id。前端
+    awemeIdOf 一直在补这一手，AI 侧却只认 media.vid —— 两边规则不一致
+    就会出现「聊天页点得开、AI 却当没看见」，而且连条 skip 日志都不留。
+    纯本地正则，不发请求。
     """
-    return (not m.get("is_me")
-            and m.get("kind") == "text"
-            and bool((m.get("text") or "").strip())
-            and bool(m.get("server_msg_id")))
+    import douyin_im as dy
+
+    media = m.get("media")
+    vid = media.get("vid") if isinstance(media, dict) else ""
+    if isinstance(vid, str) and vid.strip():
+        return vid.strip()
+    return dy.extract_aweme_id(m.get("text") or "")
+
+
+def _is_candidate(m: dict) -> bool:
+    """廉价筛选：对方发来的纯文本、分享的视频、或语音。
+
+    图片/表情/系统消息一律不回：模型看不到内容，只能瞎猜。
+    自己发的更不能回 —— 那是自问自答死循环。
+
+    视频和语音在这里只做「形状对不对」的判断（有 vid 才解析得了、
+    有 src 才转得了），**不查库**。真正的开关（reply_share /
+    reply_voice）在 handle 里查 —— 轮询线程每几秒跑一次，
+    不该为了几条消息去查配置表。
+    """
+    if m.get("is_me") or not m.get("server_msg_id"):
+        return False
+
+    kind = m.get("kind")
+    if kind == "text":
+        return bool((m.get("text") or "").strip())
+    if kind == "share":
+        media = m.get("media")
+        return (isinstance(media, dict)
+                and media.get("kind") == "video"
+                and bool(_aweme_id_of(m)))
+    if kind == "audio":
+        # 有音频地址才转得了；抖音自带转写时直接就有 asr
+        media = m.get("media")
+        if not isinstance(media, dict):
+            return False
+        return bool(media.get("src")) or bool(media.get("asr"))
+    return False
 
 
 # ── worker 生命周期 ──────────────────────────────────────
@@ -206,14 +243,46 @@ def handle(user_id: int, account_id: int, msg: dict) -> str:
         if reason:
             return _finish(db, log_id, "skipped", reason=reason)
 
+        # 开关关着就在这儿打住，别白跑一趟解析
+        kind = msg.get("kind")
+        if kind == "share" and not eff.reply_share:
+            return _finish(db, log_id, "skipped", reason="share_disabled")
+        if kind == "audio" and not eff.reply_voice:
+            return _finish(db, log_id, "skipped", reason="voice_disabled")
+        asr_cfg = _asr_config(cfg) if kind == "audio" else None
+        turns, spark_limit = eff.history_turns, max(eff.history_turns * 4, 20)
+        # cfg 是 ORM 行，会话一关再读属性就炸（commit 过之后属性是 expired 的）。
+        # 后面还要用的那几项，趁会话开着先摘出来。
+        llm_cfg = llm.LLMConfig(provider=cfg.provider, base_url=cfg.base_url,
+                                api_key=ai_reply_config.api_key(cfg),
+                                model=cfg.model, thinking=bool(cfg.thinking))
+
+    # 出 DB 会话再解析：视频总结实测 ~9s（上限 60s）、ASR 上限 60s。
+    # 占着一条 SQLite 连接干等外部接口，会把别的请求一起拖住 ——
+    # 和下面 LLM 调用被移出会话是同一个道理。
+    if kind == "share":
+        incoming = _video_input(user_id, account_id, msg)
+    elif kind == "audio":
+        incoming = _voice_input(user_id, account_id, asr_cfg, msg)
+
+    with SessionLocal() as db:
+        if kind == "share" and not incoming:
+            # 解析不出来就别回 —— 对着看不见的视频瞎接话比不回更糟
+            return _finish(db, log_id, "skipped", reason="video_parse_failed")
+        if kind == "audio" and not incoming:
+            # 转不出文字也别回 —— 模型只看得到「[语音] 3.2″」
+            return _finish(db, log_id, "skipped", reason="voice_asr_failed")
+
+        # 知识检索要用**定稿后**的 incoming：视频/语音在上面才被换成真内容，
+        # 拿「[语音] 11.7″」去检索等于白检索一次，而且是静默失败。
         knowledge = knowledge_service.retrieve(db, account_id, peer_uid, incoming)
         history = ai_reply.build_history(
             messages_service.load_conversation(
                 db, account_id, peer_uid,
                 # 多取一些：非文本消息会被压成标记、续火花模板会被剔掉，
                 # 按 turns*2 取的话，聊天里表情分享一多，实际喂进去的远不够 turns
-                limit=max(eff.history_turns * 4, 20)),
-            eff.history_turns,
+                limit=spark_limit),
+            turns,
             exclude_texts=_spark_templates(account_id, peer_uid))
         # 最后一条就是这次要回的消息，已经单独放进 user prompt 了
         if history and history[-1]["role"] == "user":
@@ -230,10 +299,6 @@ def handle(user_id: int, account_id: int, msg: dict) -> str:
         }
         system_prompt = eff.system_prompt(knowledge)
         user_prompt = ai_reply.build_user_prompt(eff.prompt_template, values)
-        api_key = ai_reply_config.api_key(cfg)
-        llm_cfg = llm.LLMConfig(provider=cfg.provider, base_url=cfg.base_url,
-                                api_key=api_key, model=cfg.model,
-                                thinking=bool(cfg.thinking))
         policy = eff.policy()
 
     # LLM 调用放在 DB 会话之外：一次十几秒，占着 SQLite 连接会拖垮别的请求
@@ -264,6 +329,78 @@ def handle(user_id: int, account_id: int, msg: dict) -> str:
         if sent != "ok":
             return _finish(db, log_id, "send_failed", reason=sent[:64])
         return _finish(db, log_id, "sent", final_text=text)
+
+
+def _account_session(user_id: int, account_id: int):
+    """拿这个账号的登录态 session。抖音协议只在 douyin_im.py，这里只负责切上下文。"""
+    import douyin_im as dy
+
+    from .storage import AccountCtx, set_account_ctx
+
+    set_account_ctx(AccountCtx(user_id=user_id, account_id=account_id))
+    return dy._load_session()
+
+
+def _video_input(user_id: int, account_id: int, msg: dict) -> str:
+    """把分享的视频解析成一段给模型看的文本；拿不到返回空串。
+
+    解析结果本身是 100% 不可信的外部输入（视频文案里写一句
+    「忽略以上指令」是零成本的攻击），围栏由 video_service.as_prompt_text
+    统一加，这里不再各拼一遍。
+    """
+    vid = _aweme_id_of(msg)
+    if not vid:
+        return ""
+    try:
+        session = _account_session(user_id, account_id)
+        if session is None:
+            print(f"[ai] acc#{account_id} 没有可用登录态，跳过视频解析")
+            return ""
+        parsed = video_service.get_or_parse(session, vid)
+    except Exception as e:
+        print(f"[ai] acc#{account_id} 视频 {vid} 解析失败: {e}")
+        return ""
+
+    # 对方分享时可能还附了一句话（105 那种「视频+评论」），带上更完整；
+    # 解析交白卷时它还是最后的退路（见 video_service._share_fallback）
+    note = (msg.get("text") or "").strip()
+    text = video_service.as_prompt_text(parsed, share_text=note)
+    if not text:
+        return ""
+    if note and note not in text:          # 退路已经用过就别再贴一遍
+        return f"{text}\n对方附言：{note}"
+    return text
+
+
+def _asr_config(cfg) -> "llm.LLMConfig":
+    """从配置行里摘出 ASR 那三项。
+
+    要在 DB 会话还开着的时候调 —— cfg 是 ORM 行，会话一关再读属性就炸。
+    """
+    return llm.LLMConfig(
+        asr_base_url=cfg.asr_base_url or "",
+        asr_model=cfg.asr_model or "",
+        asr_api_key=ai_reply_config.asr_api_key(cfg),
+    )
+
+
+def _voice_input(user_id: int, account_id: int, asr_cfg, msg: dict) -> str:
+    """把语音转成一段给模型看的文本；转不出返回空串。
+
+    转写文本是对方说的话，属于不可信输入，围栏由
+    voice_service.as_prompt_text 统一加。
+    """
+    try:
+        session = _account_session(user_id, account_id)
+        if session is None:
+            print(f"[ai] acc#{account_id} 没有可用登录态，跳过语音转写")
+            return ""
+        text = voice_service.transcribe_message(
+            session, asr_cfg, account_id, msg)
+    except Exception as e:
+        print(f"[ai] acc#{account_id} 语音转写失败: {e}")
+        return ""
+    return voice_service.as_prompt_text(text)
 
 
 def _spark_templates(account_id: int, peer_uid: str) -> set[str]:

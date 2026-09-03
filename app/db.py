@@ -74,11 +74,26 @@ def init_db():
         # 已断火花默认照发（直接发消息就能续上）；没火花的普通好友默认不发
         ("schedules", "send_to_broken", "BOOLEAN DEFAULT 1"),
         ("schedules", "send_to_no_spark", "BOOLEAN DEFAULT 0"),
+        # 发消息间隔，用户自己调。默认值复刻旧的 5.0±0.5，
+        # 升级不该悄悄改变已有账号的发送节奏
+        ("schedules", "send_min_sec", "FLOAT DEFAULT 4.5"),
+        ("schedules", "send_max_sec", "FLOAT DEFAULT 5.5"),
         # 拉历史消息（cmd=301）要带的会话数字 id
         ("contacts", "conv_short_id", "BIGINT"),
         # 重燃中的进度 N/M
         ("contacts", "recover_days", "INTEGER"),
         ("contacts", "recover_need_days", "INTEGER"),
+        # 是否回复对方分享的视频。老库一律默认关 —— 升级不该让谁的号
+        # 突然开始自动回视频，那要多打抖音的解析接口
+        ("ai_reply_configs", "reply_share", "BOOLEAN DEFAULT 0"),
+        # 联系人级覆盖，NULL = 跟随账号级
+        ("ai_reply_peers", "reply_share", "BOOLEAN"),
+        # 语音转写。老库同样默认关 —— 没配 ASR 时开着也没用
+        ("ai_reply_configs", "reply_voice", "BOOLEAN DEFAULT 0"),
+        ("ai_reply_configs", "asr_base_url", "VARCHAR(255) DEFAULT ''"),
+        ("ai_reply_configs", "asr_model", "VARCHAR(80) DEFAULT ''"),
+        ("ai_reply_configs", "asr_key_enc", "TEXT DEFAULT ''"),
+        ("ai_reply_peers", "reply_voice", "BOOLEAN"),
     ]
     with engine.begin() as conn:
         for sql in ddl:

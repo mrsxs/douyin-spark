@@ -9,7 +9,6 @@
 """
 
 import base64
-import binascii
 import json
 import os
 import queue
@@ -22,9 +21,9 @@ import tempfile
 import threading
 import time
 import urllib.request
-import zlib
+import uuid
 from collections import Counter
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -226,7 +225,8 @@ def _get_cipher():
     """返回 Fernet 实例；没配置则返回 None（自动降级到明文）"""
     try:
         from cryptography.fernet import Fernet
-        import base64, hashlib
+        import base64
+        import hashlib
         raw = os.environ.get("SAAS_CRYPT_KEY", "")
         if not raw:
             return None
@@ -243,7 +243,6 @@ def _secure_write(path: str, data: dict) -> None:
     写同目录的 tmp 文件 → fsync → chmod 0600 → os.replace → fsync 目录。
     进程崩溃时目标文件保持旧内容不会被破坏。
     """
-    import tempfile
     payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
     cipher = _get_cipher()
     blob = (_ENCRYPTED_MAGIC + cipher.encrypt(payload)) if cipher else payload
@@ -695,7 +694,7 @@ def sms_login() -> requests.Session:
     if not os.path.exists(INIT_REQ_BIN):
         print("  构造 init_req.bin ...")
         if _bootstrap_init_req(s):
-            print(f"  ✓ init_req.bin 已保存")
+            print("  ✓ init_req.bin 已保存")
         else:
             print("  ⚠ 合成 init_req 失败，下次首次使用时需要走扫码路径补齐")
     return s
@@ -1391,7 +1390,7 @@ def _pb_flat(data: bytes) -> dict:
         f = tag >> 3; w = tag & 0x7
         if w == 0:   val, pos = _read_vi(data, pos)
         elif w == 2:
-            l, pos = _read_vi(data, pos); val = data[pos:pos+l]; pos += l
+            n, pos = _read_vi(data, pos); val = data[pos:pos+n]; pos += n
         elif w == 5: val = data[pos:pos+4]; pos += 4
         elif w == 1: val = data[pos:pos+8]; pos += 8
         else: break
@@ -1427,6 +1426,28 @@ _RECOVER_PAT = re.compile(r"重燃中\s*(\d+)\s*/\s*(\d+)")
 #
 # 传 200 拿全（实测 200 和 500 结果一致，都是 37 个，4.74MB / 2.4s）。
 INIT_CONV_LIMIT = 200
+
+
+# 正常的 init 响应是 1MB 起步；短到这个数以下，回的一定是错误信封
+INIT_MIN_BYTES = 1024
+
+
+def init_error(resp_bytes: bytes) -> str:
+    """从 get_message_by_init 的错误响应里取服务端说的原因；取不到返回空串。
+
+    Why 单独一个函数：这条路失败时 HTTP 依然是 200，错误藏在 protobuf 的
+    field 4 里。早先只报「HTTP 200」，等于把唯一有用的线索丢了 ——
+    真实排查里就是靠手工解包才看到 `unexepcted session length`
+    （抖音自己的拼写），才知道是 init_req.bin 里的 IM 握手过期、要重新登录。
+    """
+    try:
+        f = _pb_flat(resp_bytes)
+        err = f.get(4)
+        if isinstance(err, bytes):
+            return err.decode("utf-8", "replace")[:200]
+    except Exception:
+        pass
+    return ""
 
 
 def build_init_body(init_req_bytes: bytes,
@@ -1501,8 +1522,9 @@ def build_history_body(init_req_bytes: bytes, conv_id: str,
     外层那堆设备环境字段（device_id / webid / UA / 屏幕尺寸…）是账户自己的，
     必须原样复用 —— 换成别人的等于串号。所以只动 cmd 和 body 两个字段。
 
-    cursor 是微秒时间戳，传上一页响应里的 next_cursor 就能继续往下翻；
-    首次可以传一个足够早的值（比如 2023-01-01 对应的 1672502400000000）。
+    cursor 是会话内序号（不是时间戳，见 parse_history_cursor）。翻页往回走：
+    传上一页**最老**那条消息的 cursor，拿到的就是更老的一页；
+    首次传 HISTORY_EPOCH_CURSOR 这个越界哨兵，抖音会给最新一页。
     """
     parts = conv_id.split(":")
     conv_type = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 1
@@ -1523,7 +1545,19 @@ def build_history_body(init_req_bytes: bytes, conv_id: str,
 
 
 def parse_history_cursor(resp_bytes: bytes) -> tuple[int, bool]:
-    """从 cmd=301 响应里取 (next_cursor, has_more)。
+    """从 cmd=301 响应里取 (下一页 cursor, has_more)。
+
+    下一页的 cursor = 本页**最老**那条消息自带的 cursor（每条消息的 field 4）。
+    翻页是**往回**走的：带上这个 cursor 再请求，拿到的是比它更老的一页。
+
+    Why 不用外层 field 2：那个字段只是把请求里的 cursor 原样回显，不是
+    next_cursor。照它翻，第二页永远等于第一页 —— 「聊天记录只到某一天、
+    再往上就没了」就是这么来的：fetch_history 的刹车在第一页就踩死，
+    一个会话最多只补得回 50 条。
+    （2026-09-03 实测：请求 cursor=epoch → 响应 f2=epoch；请求 cursor=X → f2=X。）
+
+    cursor 不是时间戳，是会话内的序号：base + index * 10000，
+    index 就是每条消息的 field 17。别自己算，直接用消息给的值。
 
     任何解析失败都返回 (0, False) —— 当成「没有下一页」。宁可少翻一页，
     也不能因为抖音改版/异常响应让调用方无限翻下去打接口。
@@ -1533,17 +1567,28 @@ def parse_history_cursor(resp_bytes: bytes) -> tuple[int, bool]:
         if isinstance(inner, list):
             inner = inner[0]
         f = _pb_flat(inner)
-        cursor = f.get(2, 0)
         has_more = f.get(3, 0)
-        if not isinstance(cursor, int) or not isinstance(has_more, int):
+        if not isinstance(has_more, int) or not has_more:
             return 0, False
-        return cursor, bool(has_more)
+
+        raws = f.get(1)
+        if raws is None:
+            return 0, False
+        if not isinstance(raws, list):
+            raws = [raws]
+        cursors = [c for c in (_pb_flat(x).get(4)
+                               for x in raws if isinstance(x, bytes))
+                   if isinstance(c, int) and c > 0]
+        if not cursors:
+            return 0, False
+        return min(cursors), True
     except Exception:
         return 0, False
 
 
-# 首次回填的起点：2023-01-01（微秒）。抖音的 cursor 是微秒时间戳，
-# 从这里往后翻能覆盖到绝大多数账号的全部聊天史
+# 首页的起点。这个值落在 cursor 空间之外，抖音对越界 cursor 的处理是
+# 「当没传，给最新一页」—— 实测传 2023-01-01 和传一个未来时间戳，
+# 回的都是最新 50 条。之后就靠每页最老那条的 cursor 一路往回翻。
 HISTORY_EPOCH_CURSOR = 1672502400000000
 
 
@@ -1554,12 +1599,12 @@ def fetch_history(session: requests.Session, init_req_bytes: bytes,
                   my_uid: str = "", sleep_between: float = 0.8) -> list[dict]:
     """把一个会话的历史消息翻完，返回 parse_messages 结构的 list。
 
-    翻页靠响应里的 next_cursor。四道刹车，任何一道触发就停：
+    从最新一页开始，一路**往回**翻到会话开头。四道刹车，任何一道触发就停：
       1. has_more=0        —— 正常翻完
       2. HTTP 非 200 / 空  —— 接口出问题，别再打
       3. 本页解析不出消息   —— 多半是抖音改了响应结构
-      4. cursor 不前进      —— 抖音在重复发同一页，再翻就是死循环
-    外加 max_pages 硬上限兜底。
+      4. cursor 不后退      —— 抖音在重复发同一页，再翻就是死循环
+    外加 max_pages 硬上限兜底（一页 50 条，40 页 ≈ 2000 条）。
 
     每页之间 sleep 一下：这是补历史，不是抢时间，别把接口打出风控。
     """
@@ -1588,10 +1633,11 @@ def fetch_history(session: requests.Session, init_req_bytes: bytes,
         out.extend(msgs)
 
         next_cursor, has_more = parse_history_cursor(r.content)
-        if not has_more:
+        if not has_more or not next_cursor:
             break
-        if next_cursor <= cursor:
-            _log(f"  [history] cursor 不前进（{cursor} → {next_cursor}），停止", "INFO")
+        # 首页的起点是个越界哨兵值，和真 cursor 不在一个量级，不参与比较
+        if page > 0 and next_cursor >= cursor:
+            _log(f"  [history] cursor 不后退（{cursor} → {next_cursor}），停止", "INFO")
             break
         cursor = next_cursor
         if sleep_between:
@@ -1610,7 +1656,7 @@ def extract_constants(bin_path: str) -> dict:
         f = tag >> 3; w = tag & 0x7
         if w == 0: _, pos = _read_vi(data, pos)
         elif w == 2:
-            l, pos = _read_vi(data, pos); val = data[pos:pos+l]; pos += l
+            n, pos = _read_vi(data, pos); val = data[pos:pos+n]; pos += n
             if f == 4:   c["hash"]        = val.decode()   # token (field 4)
             elif f == 7:  c["trace_id"]   = val.decode()   # build_number
             elif f == 23: c["ts_sign"]    = val.decode()
@@ -2390,6 +2436,501 @@ def _walk_users(obj, callback):
                 _walk_users(v, callback)
 
 
+# ── 分享视频解析 ──────────────────────────────────────────────────────
+#
+# 懒解析：只有 AI 真要回复某条分享视频时才调一次。聊天页浏览**不触发** ——
+# 这是给真人号新增的一类抖音请求，能不打就不打，风控额度花在刀刃上。
+#
+# 实测（两个真实视频，均 status_code=0）能白拿：完整文案、话题、
+# 抖音自己打的三级内容分类、作者、统计、时长。
+# 拿不到的是逐字 OCR / 字幕（seo_info 恒为空）—— 画面识别只能走
+# video.big_thumbs 雪碧图，好处是不用下载视频、不用装 ffmpeg。
+
+# 文案上限。抖音视频文案能有上千字（整篇小作文），
+# 整段进 prompt 就是白烧 token，还会把人设指令挤出上下文。
+AWEME_DESC_MAX = 400
+
+# aweme_id 是 19 位左右的雪花 id。卡死纯数字 + 长度：
+# 它要拼进请求 URL 和播放器地址，放行任意字符串就是一个注入口。
+_AWEME_ID_RE = re.compile(r"^\d{15,24}$")
+
+# 从聊天文本里捞视频链接。只认抖音自己的域名 ——
+# 否则随便谁挂个 evil.com/video/123 就能指使我们带着登录态去请求。
+_AWEME_URL_RE = re.compile(
+    r"https?://(?:[\w-]+\.)*(?:douyin|iesdouyin)\.com/[^\s]*?"
+    r"(?:video/|modal_id=)(\d{15,24})", re.I)
+
+# web 接口的公共 query 参数（与 fetch_self_profile / fetch_nicknames 同一套）
+_WEB_BASE_PARAMS = {
+    "device_platform": "webapp",  "aid": "6383",
+    "channel": "channel_pc_web",  "version_code": "170400",
+    "version_name": "17.4.0",     "cookie_enabled": "true",
+    "platform": "PC",             "downlink": "10",
+    "browser_language": "zh-CN",  "browser_platform": "MacIntel",
+    "browser_name": "Chrome",     "browser_version": "147.0.0.0",
+    "os_name": "Mac OS",
+}
+
+
+def extract_aweme_id(text) -> str:
+    """从一段文本里提取视频 id。**纯本地，不发任何请求**。
+
+    认三种形态：裸的纯数字 id、抖音域名下的 `/video/<id>`、`modal_id=<id>`。
+    `v.douyin.com` 短链提不出来 —— 它要跟随重定向才知道指向哪，
+    那是一次网络请求，不该藏在一个看起来纯本地的函数里。
+    """
+    s = text.strip() if isinstance(text, str) else ""
+    if not s:
+        return ""
+    if _AWEME_ID_RE.match(s):
+        return s
+    m = _AWEME_URL_RE.search(s)
+    return m.group(1) if m else ""
+
+
+def _int(v) -> int:
+    """只认真正的非负整数。抖音偶尔把数字给成字符串/None，一律当 0。"""
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def _names(node, key: str) -> list[str]:
+    """从 `[{key: name}, ...]` 里取非空名字，去重保序。"""
+    if not isinstance(node, list):
+        return []
+    out: list[str] = []
+    for item in node:
+        if not isinstance(item, dict):
+            continue
+        name = _s(item, key)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _sprites(node) -> dict | None:
+    """雪碧图：抖音把整段视频的缩略图拼成几张大图（实测 5x5 网格、2 秒一帧）。
+
+    抖音不给 OCR 也不给字幕，画面识别只能靠它。好处是一张图覆盖全片，
+    不用下载视频、不用 ffmpeg。代价是 URL 带 x-expires 且只有几小时 ——
+    **不能长期缓存**，解析完要立刻用掉。
+    """
+    if not isinstance(node, list) or not node:
+        return None
+    first = node[0]
+    if not isinstance(first, dict):
+        return None
+    raw = first.get("img_urls")
+    if not isinstance(raw, list):
+        return None
+    urls = [safe_media_url(u) for u in raw if safe_media_url(u)]
+    if not urls:
+        return None
+    return {
+        "urls":     urls,
+        "cols":     _int(first.get("img_x_len")),
+        "rows":     _int(first.get("img_y_len")),
+        "count":    _int(first.get("img_num")),
+        "interval": _int(first.get("interval")),
+    }
+
+
+def _normalize_aweme(aweme_id: str, d: dict) -> dict:
+    """把 aweme_detail 压成一个固定结构 —— 调用方不该碰抖音的原始字段。"""
+    video  = d.get("video")      if isinstance(d.get("video"), dict)      else {}
+    stats  = d.get("statistics") if isinstance(d.get("statistics"), dict) else {}
+    author = d.get("author")     if isinstance(d.get("author"), dict)     else {}
+    music  = d.get("music")      if isinstance(d.get("music"), dict)      else {}
+
+    # desc 是主文案；偶尔为空，caption 是它的近义字段（实测两者常常一样）
+    desc = _s(d, "desc") or _s(d, "caption")
+    if len(desc) > AWEME_DESC_MAX:
+        desc = desc[:AWEME_DESC_MAX] + "…"
+
+    return {
+        "aweme_id":    aweme_id,
+        "desc":        desc,
+        "title":       _s(d, "item_title"),
+        "author":      {"nickname": _s(author, "nickname"),
+                        "sec_uid":  _s(author, "sec_uid")},
+        "duration_ms": _int(d.get("duration")) or _int(video.get("duration")),
+        "create_time": _int(d.get("create_time")),
+        "cover":       _first_url(video.get("cover")),
+        "tags":        _names(d.get("text_extra"), "hashtag_name"),
+        # 抖音自己打的三级内容分类（随拍 / 生活记录 / 日常vlog），
+        # 相当于一份现成的「这视频在讲什么」，比我们自己猜准
+        "categories":  _names(d.get("video_tag"), "tag_name"),
+        "stats": {
+            "digg":    _int(stats.get("digg_count")),
+            "comment": _int(stats.get("comment_count")),
+            "share":   _int(stats.get("share_count")),
+            "collect": _int(stats.get("collect_count")),
+        },
+        "music":   _s(music, "author"),
+        "sprites": _sprites(video.get("big_thumbs")),
+    }
+
+
+# ArgusSecurityPlugin 会以「Uifid Not Found」挡下请求（403 纯文本）。
+# 实测同一个 session 连打 6 个视频：1 次过的两个，2 次过的一个，
+# 3 次过的一个，4 次才过的两个 —— 重试次数少了就是随机失败。
+# 这不是偶发抖动：每个新建 session 都要靠重试「热」起来，
+# 而服务端每个请求都新建 session，所以每次都撞得上。
+_DETAIL_MAX_TRIES = 5
+
+# 重试间隔。连打没有意义，给风控一点喘息，也别让用户等太久
+# （最坏 4 次退避 ≈ 1.2s，还在点开视频能接受的范围内）。
+_DETAIL_RETRY_GAP = 0.3
+
+
+def _aweme_detail_raw(session: requests.Session, aweme_id: str) -> dict:
+    """打 aweme/detail 拿原始详情；任何失败都返回 `{}`。
+
+    只对 403 重试：业务错误（status_code != 0）重试也是同样的结果，
+    白送一次风控额度。
+    """
+    vid = str(aweme_id).strip() if aweme_id is not None else ""
+    if not _AWEME_ID_RE.match(vid):
+        return {}
+    try:
+        for attempt in range(_DETAIL_MAX_TRIES):
+            qs = _sign_params(dict(_WEB_BASE_PARAMS, aweme_id=vid))
+            r = session.get(
+                f"https://www.douyin.com/aweme/v1/web/aweme/detail/?{qs}", timeout=15)
+            if r.status_code == 403 and attempt + 1 < _DETAIL_MAX_TRIES:
+                time.sleep(_DETAIL_RETRY_GAP)
+                continue
+            # 被风控挡下时抖音回的是验证码 HTML，不是 JSON
+            if not r.text.strip().startswith("{"):
+                return {}
+            j = r.json()
+            if j.get("status_code") != 0:
+                return {}
+            detail = j.get("aweme_detail")
+            return detail if isinstance(detail, dict) else {}
+    except Exception as e:
+        print(f"[aweme] {vid} 解析失败: {e}")
+    return {}
+
+
+def fetch_aweme_detail(session: requests.Session, aweme_id: str) -> dict:
+    """拉视频详情并归一化；任何失败都返回 `{}`，由调用方判空。
+
+    静默失败是刻意的：调用方是 AI 自动回复链路，
+    一次解析异常不该把整条回复打挂（宁可不回，也不能崩）。
+    """
+    detail = _aweme_detail_raw(session, aweme_id)
+    if not detail:
+        return {}
+    return _normalize_aweme(str(aweme_id).strip(), detail)
+
+
+# ── 网页内嵌播放：直链挑档 + 反代拉流 ────────────────────────────────
+#
+# 播放直链带时效签名（URL 里那段 hex 是过期时间，实测约两天），
+# 所以**不入库**：现取现用，由上层做短 TTL 内存缓存。
+# 它进的又是我们带登录态的 session，域名白名单是挡 SSRF 的唯一一道，别放宽。
+
+_VIDEO_HOST_RE = re.compile(
+    r"^https://(?:[\w-]+\.)*(?:douyinvod|douyinstatic|douyin)\.com/", re.I)
+
+# 客户端发来的 Range 是外部输入，原样转发等于把头注入面递给上游。
+# 允许多段（RFC 7233 的 `bytes=0-99,200-299`，上游回 multipart/byteranges）：
+# 整条丢掉会退成 200 全量 —— 客户端要 200 字节，我们给它 9MB。
+# 段数封在 10 以内，不然一个请求就能让上游拼出个超大响应。
+_RANGE_RE = re.compile(
+    r"^bytes=\d{0,15}-\d{0,15}(?:,[ ]?\d{0,15}-\d{0,15}){0,9}$")
+
+VIDEO_CHUNK = 64 * 1024
+
+
+def _urls_of(node) -> list[str]:
+    """取 play_addr 类节点的 url_list，只留白名单内的 https 直链。"""
+    if not isinstance(node, dict):
+        return []
+    urls = node.get("url_list")
+    if not isinstance(urls, list):
+        return []
+    return [u for u in urls
+            if isinstance(u, str) and _VIDEO_HOST_RE.match(u.strip())]
+
+
+def _pick_play_url(video: dict) -> str:
+    """从各档里挑一条适合聊天气泡内嵌播的 mp4 直链。
+
+    挑**码率最低**的那档：1080p 一条 60MB，气泡里 200px 宽根本看不出差别，
+    起播快比清晰重要。dash 档要跳过 —— 那是分片清单，
+    `<video src>` 直接喂播不出来。
+    """
+    if not isinstance(video, dict):
+        return ""
+
+    gears = video.get("bit_rate")
+    cands: list[tuple[int, str]] = []
+    if isinstance(gears, list):
+        for it in gears:
+            if not isinstance(it, dict) or it.get("format") != "mp4":
+                continue
+            urls = _urls_of(it.get("play_addr"))
+            if urls:
+                cands.append((_int(it.get("bit_rate")), urls[0]))
+    if cands:
+        cands.sort(key=lambda c: c[0])
+        return cands[0][1]
+
+    # 没分档的老作品：退回整段 play_addr
+    for key in ("play_addr", "play_addr_h264"):
+        urls = _urls_of(video.get(key))
+        if urls:
+            return urls[0]
+    return ""
+
+
+def fetch_aweme_play_url(session: requests.Session, aweme_id: str) -> str:
+    """拿一条能直接喂给 `<video>` 的 mp4 直链；失败返回 `""`。"""
+    detail = _aweme_detail_raw(session, aweme_id)
+    if not detail:
+        return ""
+    return _pick_play_url(detail.get("video"))
+
+
+def open_video_stream(session: requests.Session, url,
+                      range_header: str | None = None):
+    """打开直链的流式响应交给调用方转发；不可用时返回 None。
+
+    调用方负责 `close()`。这里只管协议侧：白名单、Referer、Range 透传。
+    """
+    u = url.strip() if isinstance(url, str) else ""
+    if not u or not _VIDEO_HOST_RE.match(u):
+        return None
+
+    headers = {"Referer": "https://www.douyin.com/"}
+    rng = range_header.strip() if isinstance(range_header, str) else ""
+    if rng and _RANGE_RE.match(rng):
+        headers["Range"] = rng
+
+    try:
+        r = session.get(u, headers=headers, stream=True, timeout=30)
+    except Exception as e:
+        print(f"[video] 拉流失败: {e}")
+        return None
+    if r.status_code not in (200, 206):
+        print(f"[video] HTTP {r.status_code}")
+        r.close()                      # 不关会漏连接池
+        return None
+    return r
+
+
+# ── 抖音自带「AI 视频总结」──────────────────────────────────────────
+#
+# 抖音客户端「AI抖音 → 视频总结」背后的接口。它直接给出结构化的内容梗概，
+# 比我们拿 136x240 的雪碧图猜画面准得多，也省掉 ffmpeg 依赖和多模态调用的钱。
+#
+# 接口特征（实测）：
+#   - **不带 a_bogus 签名**，只认 cookie + Referer（Referer 缺了会被拒）
+#   - text/event-stream，正文逐词流式追加，一次约 8 秒
+#   - 正文在 data[].display.display.generation_spans[].text.content
+#
+# 它比 aweme/detail 慢一个数量级，也更"重"，所以只在 AI 真要回复视频时调，
+# 且结果长期缓存 —— 同一个视频的总结不会变。
+
+AWEME_SUMMARY_MAX = 600          # 总结进 prompt 的长度上限
+_SUMMARY_TIMEOUT  = 60           # 实测 ~8s 出完，给足余量
+_SUMMARY_URL      = "https://so-landing.douyin.com/douyin/select/v1/ai/stream/"
+# 抖音给重点词包的高亮标签。留着会让模型学着输出 <mark>
+_MARK_RE = re.compile(r"</?mark>", re.I)
+
+# 「看起来正常、其实没内容」的两种回答，都必须当成没拿到：
+#   1) 道歉模板 —— 无文案的短视频常触发，抖音反过来教你去用豆包 AI 总结
+#   2) 百科式回答 —— aweme_id 不存在时，抖音把 keyword「视频总结」当普通
+#      搜索词，一本正经讲「什么是视频总结」（实测 445 字）
+# 这两段读起来都很通顺，喂给 AI 就是让它对着不存在的内容瞎接话。
+_BOGUS_SUMMARY_RES = [
+    re.compile(r"无法(直接)?(访问|获取|提供|读取|查看)"),
+    re.compile(r"^视频总结是"),
+    re.compile(r"建议您?直接观看视频"),
+]
+
+
+def _summary_device_id() -> str:
+    """web 端 device_id 存在 localStorage，cookie 里没有；实测随便给个 19 位数字也通。"""
+    return str(random.randint(7_000_000_000_000_000_000, 7_999_999_999_999_999_999))
+
+
+def _summary_search_id() -> str:
+    """抓包里是 20260901211047719474D38AC6F9601148：时间戳 + 20 位随机十六进制。"""
+    return time.strftime("%Y%m%d%H%M%S") + "".join(
+        random.choice("0123456789ABCDEF") for _ in range(20))
+
+
+def _summary_spans(event: dict) -> list[str]:
+    """从一个 SSE data 事件里取出正文片段。结构不认识就当没有，绝不抛。"""
+    out: list[str] = []
+    for item in event.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        display = item.get("display")
+        inner = display.get("display") if isinstance(display, dict) else None
+        if not isinstance(inner, dict):
+            continue
+        for span in inner.get("generation_spans") or []:
+            if not isinstance(span, dict):
+                continue
+            text = span.get("text")
+            content = text.get("content") if isinstance(text, dict) else None
+            if isinstance(content, str) and content:
+                out.append(content)
+    return out
+
+
+def fetch_aweme_summary(session: requests.Session, aweme_id: str) -> str:
+    """拿抖音自己生成的视频内容总结；失败返回 ""（调用方判空）。
+
+    ⚠ **调用前必须先用 fetch_aweme_detail 确认视频存在。**
+    这个接口对不存在/已删除的 aweme_id 不报错，而是把 keyword「视频总结」
+    当成普通搜索词，一本正经地回一篇「什么是视频总结」的百科 —— 实测 445 字，
+    读起来完全正常。那段文本喂给 AI 就是让它对着不存在的视频答非所问。
+    流里没有任何字段能区分这两种情况（gid 只是回显入参，
+    ask_ai_agent_type 在 PC web 路径下不出现），所以只能靠 detail 守门。
+
+    流到一半坏掉时保住已经收到的部分 —— 半份摘要也比没有强。
+    """
+    vid = str(aweme_id).strip() if aweme_id is not None else ""
+    if not _AWEME_ID_RE.match(vid):
+        return ""
+
+    device_id = _summary_device_id()
+    params = {
+        "conversation_id": str(uuid.uuid4()),
+        "pre_search_id": _summary_search_id(),
+        "conversation_rank": "1",
+        "count": "5",
+        "cursor": "0",
+        "token": "search",
+        "ai_page_type": "ai_chat",
+        # 这个才是「总结哪个视频」——名字很绕，但它就是 aweme_id
+        "ai_search_enter_from_group_id": vid,
+        "search_channel": "aweme_ai_chat",
+        "enable_ai_tab_new_framework": "1",
+        "need_integration_card": "1",
+        "ai_chat_message_use_lynx": "1",
+        "version_code": "32.1.0",
+        "enter_method": "auto_show",
+        "enter_from": "search_result",
+        "search_type": "ai_chat_search",
+        "aid": "6383",
+        "device_id": device_id,
+        "keyword": "视频总结",
+        "search_source": "auto_show",
+        "enter_from_second": "auto_show",
+        "pc_ai_search_enable_rich_media": "0",
+        "pc_ai_search_enable_ruyi": "1",
+        "enable_ai_search_deep_think": "0",
+        "client_server_extra":
+            '{"ask_ai_client_config":"{\\"need_personal_summary\\":\\"\\"}"}',
+    }
+    patch = quote(
+        f'{{"ai_search_enter_from_group_id":"{vid}","aweme_id":"{vid}"}}')
+    headers = {
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": (f"https://so-landing.douyin.com/search_ai_mobile/pc?aid=6383"
+                    f"&device_id={device_id}&ai_search_req_patch={patch}"
+                    f"&scene=feed&enter_from=discover&theme=dark"),
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+
+    parts: list[str] = []
+    try:
+        r = session.get(f"{_SUMMARY_URL}?{urlencode(params)}",
+                        headers=headers, stream=True, timeout=_SUMMARY_TIMEOUT)
+        if r.status_code != 200:
+            print(f"[summary] {vid} HTTP {r.status_code}")
+            return ""
+        deadline = time.monotonic() + _SUMMARY_TIMEOUT
+        try:
+            # 关键：不能用 decode_unicode —— requests 会在 chunk 边界
+            # 把 UTF-8 多字节切坏，中文直接变乱码。按 bytes 分行再自己解码
+            # 是安全的（UTF-8 续字节里不含 \n）。
+            for raw in r.iter_lines():
+                if time.monotonic() > deadline:
+                    break
+                if not raw or not raw.startswith(b"data:"):
+                    continue
+                try:
+                    event = json.loads(raw[5:].decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue        # 坏掉一行不该丢掉整份摘要
+                if isinstance(event, dict):
+                    parts.extend(_summary_spans(event))
+        finally:
+            r.close()
+    except Exception as e:
+        print(f"[summary] {vid} 拉取失败: {e}")
+        if not parts:
+            return ""
+
+    text = _MARK_RE.sub("", "".join(parts)).strip()
+    # 只看开头一段：真总结偶尔会在结尾提「无法确认某个细节」，
+    # 那不算失败；假总结是开门见山就说自己看不了视频。
+    head = text[:80]
+    if any(rx.search(head) for rx in _BOGUS_SUMMARY_RES):
+        print(f"[summary] {vid} 拿到的是占位回答，按没有处理")
+        return ""
+    if len(text) > AWEME_SUMMARY_MAX:
+        text = text[:AWEME_SUMMARY_MAX] + "…"
+    return text
+
+
+# ── 语音消息下载 ──────────────────────────────────────────────────────
+#
+# 抖音的 IM 语音**不带转写**：实测库里 69 条语音，带 ai_audio_text 的 0 条。
+# 拿得到的只有音频地址（.mpeg，带签名；实测不需要 Referer 就能下）。
+# 转写只能自己接 ASR，见 app/llm.py:transcribe。
+
+# 语音正常几百 KB（实测 11.7 秒 = 247KB）。1MB 封顶，
+# 不封的话一个坏 URL 就能把内存吃光。
+AUDIO_MAX_BYTES = 1_000_000
+
+# 这些 URL 来自抖音响应，但它进的是我们**带登录态的 session** ——
+# 域名白名单是挡住 SSRF 的唯一一道。别放宽。
+_AUDIO_HOST_RE = re.compile(
+    r"^https://(?:[\w-]+\.)*(?:douyinstatic|douyinvod|douyinpic|douyin)\.com/", re.I)
+
+
+def fetch_audio(session: requests.Session, url,
+                max_bytes: int = AUDIO_MAX_BYTES) -> bytes:
+    """下载一条语音，返回字节；任何问题都返回 b""（调用方判空）。
+
+    超过 max_bytes 整个放弃 —— 回一段截断的音频只会让 ASR 转出半句话，
+    比没有更误导人。
+    """
+    u = url.strip() if isinstance(url, str) else ""
+    if not u or not _AUDIO_HOST_RE.match(u):
+        return b""
+    try:
+        r = session.get(u, stream=True, timeout=30)
+        try:
+            if r.status_code != 200:
+                print(f"[audio] HTTP {r.status_code}")
+                return b""
+            buf = bytearray()
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    print(f"[audio] 超过 {max_bytes} 字节上限，放弃")
+                    return b""
+            return bytes(buf)
+        finally:
+            r.close()
+    except Exception as e:
+        print(f"[audio] 下载失败: {e}")
+        return b""
+
+
 def fetch_self_profile(session: requests.Session, my_uid: str) -> dict:
     """拉自己的 profile（昵称 + 头像）。
 
@@ -2753,7 +3294,7 @@ def send_text(session: requests.Session, conv_id: str, text: str,
                     if extras:
                         print(f"  ✓ 发送成功 (server: OK) extras={extras}")
                     else:
-                        print(f"  ✓ 发送成功 (server: OK)")
+                        print("  ✓ 发送成功 (server: OK)")
                     _update_send_info(ok=True)
                     return True
                 print(f"  ✗ 服务端拒绝: message={msg!r} error_desc={edesc!r}")
@@ -2798,10 +3339,10 @@ def _run_auto_keepalive(session, contacts, constants):
             ok = False
         if ok:
             sent += 1
-            _log(f"    ✓ 已送达", "OK")
+            _log("    ✓ 已送达", "OK")
         else:
             failed += 1
-            _log(f"    ✗ 失败", "FAIL")
+            _log("    ✗ 失败", "FAIL")
     _log(f"续火花完成: 成功 {sent}, 跳过 {skipped}, 失败 {failed}", "DONE")
 
 
@@ -2839,7 +3380,7 @@ def _edit_contact_menu(label: str, entry: dict) -> dict:
             for i, m in enumerate(msgs, 1):
                 print(f"    {i}. {m!r}")
         else:
-            print(f"  消息列表: (空，将走 default 兜底)")
+            print("  消息列表: (空，将走 default 兜底)")
         print("\n  操作:")
         print("    t  切换启用/禁用")
         print("    a  添加消息")
