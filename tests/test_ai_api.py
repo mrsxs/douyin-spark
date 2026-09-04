@@ -53,12 +53,11 @@ def other_acc(db, active_user):
 @pytest.fixture
 def stranger(db):
     """另一个用户 + 他的账号。"""
-    from datetime import datetime, timedelta
 
     from app.models import User
     from app.security import hash_password
     u = User(username="stranger", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="别人的号", status="active")
     db.add(a); db.commit(); db.refresh(a)

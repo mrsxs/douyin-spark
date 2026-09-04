@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password_hash: str = ""   # bcrypt 哈希；见 `python -m app.cli hash-password`
 
+    # ── 注册开关 ──
+    # 默认关闭。拆掉授权码后，注册即拿到 DEFAULT_MAX_ACCOUNTS 个抖音号槽位
+    # 和完整 API 权限 —— 面板一旦暴露到公网，陌生人注册完就能用你的服务器
+    # 和 IP 去打抖音接口，风控算在你头上。自部署想开放注册再显式打开。
+    allow_register: bool = False
+
     # ── Session ──
     secret_key: str = ""
     session_max_age: int = 30 * 24 * 3600

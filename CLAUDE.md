@@ -11,15 +11,15 @@
 
 ## 最高优先级硬约束（违反即停）
 
-1. **凭证零泄露**：cookies、`license_private_key.pem`、`SECRET_KEY`、SMTP 密码、抖音 token 绝不进 git / 镜像 / 日志 / 前端响应。提交前扫 `git diff --cached`。
+1. **凭证零泄露**：cookies、`SECRET_KEY`、SMTP 密码、用户的 LLM/ASR key、抖音 token、自建服务地址，绝不进 git / 镜像 / 日志 / 前端响应。**仓库是公开的**，提交前扫 `git diff --cached`。
 2. **抖音协议只在 `douyin_im.py`**：`app/` 不直接拼抖音请求、不写签名逻辑；通过 `import douyin_im as dy` 调用。
-3. **动 license / 加密 / CSRF·session / scheduler 触发 / douyin 签名链 = Heavy 任务**：先说清影响面再改，必须有测试——这些错了会静默风控或留漏洞。
+3. **动加密 / CSRF·session / 权限判定 / scheduler 触发 / douyin 签名链 = Heavy 任务**：先说清影响面再改，必须有测试——这些错了会静默风控或留漏洞。
 
 ## 技术栈速记
 
-Python 3.13 · FastAPI · SQLAlchemy 2.0 · SQLite(WAL，迁移手写在 `app/db.py:init_db`) · Jinja2+Alpine.js+Tailwind CDN(无构建) · bcrypt/itsdangerous/cryptography(Fernet+RSA) · Playwright(仅扫码登录) · Node 子进程签名(`lib/`)。**无 Redis、无消息队列**。外部依赖：抖音 API、自建 ddddocr 验证码服务。
+Python 3.13 · FastAPI · SQLAlchemy 2.0 · SQLite(WAL，迁移手写在 `app/db.py:init_db`) · Jinja2+Alpine.js+Tailwind CDN(无构建) · bcrypt/itsdangerous/cryptography(Fernet) · Playwright(仅扫码登录) · Node 子进程签名(`lib/`)。**无 Redis、无消息队列**。外部依赖：抖音 API、自建 ddddocr 验证码服务。
 
-启动：`SKIP_LICENSE_CHECK=1 python run.py --port 8765`
+启动：`python run.py --port 8765`（加 `--reload` 开发用）
 
 ## 知识层（业务/架构详解）
 
@@ -31,4 +31,4 @@ Python 3.13 · FastAPI · SQLAlchemy 2.0 · SQLite(WAL，迁移手写在 `app/db
 
 ## 安全红线（一句话版）
 
-密钥只进 `.env`（`.env.example` 只留空占位）；`data/`、`*.pem`、`*.douyin_*` 全部 gitignore；提交前 `git diff --cached | grep -iE 'secret|password|private.?key|cookie'` 应无真实值命中。详见 [安全红线](.harness/rules/安全红线.md)。
+密钥只进 `.env`（`.env.example` 只留空占位）；`data/`、`*.pem`、`*.douyin_*` 全部 gitignore；自建服务的 IP/域名同样只进 `.env`；提交前 `git diff --cached | grep -iE 'secret|password|private.?key|cookie'` 应无真实值命中。详见 [安全红线](.harness/rules/安全红线.md)。

@@ -1,18 +1,17 @@
-﻿# 续火花 SaaS Windows 一键运维脚本
+﻿# 续火花 Windows 一键运维脚本
 #
 # 用法：
 #   1. 装 Docker Desktop for Windows: https://www.docker.com/products/docker-desktop
 #   2. 下载本脚本：
-#      iwr https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/manage.ps1 -OutFile manage.ps1
+#      iwr https://raw.githubusercontent.com/mrsxs/douyin-spark/main/manage.ps1 -OutFile manage.ps1
 #   3. 右键 → "用 PowerShell 运行"
 #      或 PowerShell 里：powershell -ExecutionPolicy Bypass -File .\manage.ps1
 #
 # 功能：
 #   [1] 安装/启动/升级
 #   [2] 重置用户密码
-#   [3] 续期 License
-#   [4] 查看状态 & 日志
-#   [5] 卸载
+#   [3] 查看状态 & 日志
+#   [4] 卸载
 
 $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -20,7 +19,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 chcp 65001 > $null
 
 # ─── 配置 ────────────────────────────────
-$COMPOSE_URL = "https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/docker-compose.yml"
+$COMPOSE_URL = "https://raw.githubusercontent.com/mrsxs/douyin-spark/main/docker-compose.yml"
 $IMAGE       = "mrsxs/douyin-spark:latest"
 $INSTALL_DIR = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { "$env:USERPROFILE\douyin-spark" }
 $CONTAINER   = "douyin-spark"
@@ -56,7 +55,7 @@ function Wait-Ready {
             }
         } catch { Start-Sleep -Seconds 1 }
     }
-    Warn "60 秒内未就绪，看 [4] 状态 & 日志"
+    Warn "60 秒内未就绪，看 [3] 状态 & 日志"
     return $false
 }
 
@@ -94,7 +93,7 @@ function Do-Install {
     }
 
     # 检查已有 .env
-    if ((Test-Path ".env") -and ((Get-Content ".env" -Raw) -match "LICENSE_KEY=.+")) {
+    if ((Test-Path ".env") -and ((Get-Content ".env" -Raw).Trim())) {
         Warn "已有 .env 配置"
         $reconfig = Read-Host "重新配置？[y/N]"
         if ($reconfig -notmatch "^[Yy]$") {
@@ -107,10 +106,10 @@ function Do-Install {
     }
 
     # 配置向导
-    Write-Host "`n━━━ 配置向导（4 步）━━━" -ForegroundColor Cyan
+    Write-Host "`n━━━ 配置向导（3 步）━━━" -ForegroundColor Cyan
 
-    # [1/4] 数据存储路径
-    Write-Host "`n[1/4] 数据存储路径（cookies / DB / 日志 / 加密密钥全存这里）" -ForegroundColor White
+    # [1/3] 数据存储路径
+    Write-Host "`n[1/3] 数据存储路径（cookies / DB / 日志 / 加密密钥全存这里）" -ForegroundColor White
     Write-Host "  默认: $INSTALL_DIR\data" -ForegroundColor Gray
     Write-Host "  也可填绝对路径如 D:\MyData\spark" -ForegroundColor Gray
     $DATA_PATH = (Read-Host "DATA_PATH (回车用默认)").Trim()
@@ -129,27 +128,23 @@ function Do-Install {
     }
     Info "数据目录：$REAL_DATA_PATH（删除容器不丢）"
 
-    # [2/4] License Key
-    Write-Host "`n[2/4] License Key" -ForegroundColor White
-    while ($true) {
-        $LICENSE_KEY = (Read-Host "LICENSE_KEY (粘贴卖家给的长字符串)").Trim()
-        if (-not $LICENSE_KEY) { Warn "不能为空"; continue }
-        if ($LICENSE_KEY -notmatch "\.") {
-            Warn "格式异常（无 . 分隔签名）"
-            $ok = Read-Host "继续？[y/N]"
-            if ($ok -notmatch "^[Yy]$") { continue }
-        }
-        break
-    }
-    Info "License 已接收（$($LICENSE_KEY.Length) 字符）"
-
-    # [3/4] 验证码 Key
-    Write-Host "`n[3/4] 验证码 Key（DDDocr 滑块服务，可回车跳过）" -ForegroundColor White
+    # [2/3] 验证码 Key
+    Write-Host "`n[2/3] 验证码服务（自建 ddddocr 滑块识别，可回车跳过）" -ForegroundColor White
+    Write-Host "      只有「短信登录」用得上；扫码登录不需要。" -ForegroundColor Gray
     $CAPTCHA_KEY = (Read-Host "DOUYIN_CAPTCHA_KEY").Trim()
-    if ($CAPTCHA_KEY) { Info "验证码 Key 已接收" } else { Warn "跳过" }
+    $CAPTCHA_URL = ""
+    if ($CAPTCHA_KEY) {
+        # 光有 key 没有地址是配了个寂寞：compose 里 DOUYIN_CAPTCHA_URL 默认空，
+        # 运行时滑块验证会直接失败，而用户以为自己配好了。
+        $CAPTCHA_URL = (Read-Host "DOUYIN_CAPTCHA_URL（服务地址，如 https://ocr.example.com）").Trim()
+        if ($CAPTCHA_URL) { Info "验证码服务已配置" }
+        else { Warn "只填了 Key 没填地址 —— 短信登录的滑块验证仍然不可用" }
+    } else {
+        Warn "跳过（短信登录滑块无法自动识别，扫码登录不受影响）"
+    }
 
-    # [4/4] 管理员密码
-    Write-Host "`n[4/4] 管理员密码（自定义或回车随机）" -ForegroundColor White
+    # [3/3] 管理员密码
+    Write-Host "`n[3/3] 管理员密码（自定义或回车随机）" -ForegroundColor White
     $ADMIN_PASS = Read-Password "ADMIN_PASSWORD"
     $useCustom = $false
     if ($ADMIN_PASS) {
@@ -182,9 +177,9 @@ function Do-Install {
     $envContent = @(
         "# 由 manage.ps1 生成 - $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')"
         "DATA_VOLUME_PATH=$DATA_PATH"
-        "LICENSE_KEY=$LICENSE_KEY"
     )
     if ($CAPTCHA_KEY) { $envContent += "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY" }
+    if ($CAPTCHA_URL) { $envContent += "DOUYIN_CAPTCHA_URL=$CAPTCHA_URL" }
     $envContent += "ADMIN_USERNAME=admin"
     if ($ADMIN_HASH) {
         # ⚠️ docker compose 把 $2b$12$xxx 当变量引用 → 必须 $ → $$ 转义
@@ -255,9 +250,8 @@ function Do-ResetPassword {
     # 准备 inline python
     $py = @'
 import os, bcrypt
-from datetime import datetime
 from app.db import SessionLocal, init_db
-from app.models import User
+from app.models import DEFAULT_MAX_ACCOUNTS, User
 init_db()
 username = os.environ.get('UNAME', 'admin')
 pwd = os.environ['NEW']
@@ -268,10 +262,9 @@ with SessionLocal() as db:
     if not u:
         u = User(username=username, password_hash=h,
                  is_admin=make_admin, is_active=True,
-                 expires_at=datetime(2099, 12, 31) if make_admin else None,
-                 max_accounts=100 if make_admin else 0)
+                 max_accounts=100 if make_admin else DEFAULT_MAX_ACCOUNTS)
         db.add(u)
-        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户（需兑换授权码激活）"} {username}'
+        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户"} {username}'
     else:
         u.password_hash = h
         u.is_active = True
@@ -300,64 +293,9 @@ with SessionLocal() as db:
     Write-Host "  👤 $username" -ForegroundColor White
 }
 
-# ─── [3] 续期 License ──────────────────────────
-function Do-Renew {
-    Title "[3] 续期 License"
-    Set-Location $INSTALL_DIR
-    if (-not (Test-Path ".env")) { Die ".env 不存在，请先选 [1]" }
-
-    Write-Host "当前 License："
-    docker compose logs --tail 200 2>&1 | Select-String -Pattern "License 已验证" -Context 0,5
-    Write-Host ""
-
-    while ($true) {
-        $newLic = (Read-Host "粘贴卖家新签的 License Key").Trim()
-        if (-not $newLic) { Warn "不能为空"; continue }
-        if ($newLic -notmatch "\.") {
-            Warn "格式异常"
-            $ok = Read-Host "继续？[y/N]"
-            if ($ok -notmatch "^[Yy]$") { continue }
-        }
-        break
-    }
-
-    $bak = ".env.bak.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-    Copy-Item ".env" $bak
-    Info "旧 .env 备份到 $bak"
-
-    $envText = Get-Content ".env" -Raw
-    if ($envText -match "(?m)^LICENSE_KEY=") {
-        $envText = $envText -replace "(?m)^LICENSE_KEY=.*$", "LICENSE_KEY=$newLic"
-    } else {
-        $envText = $envText.TrimEnd() + "`nLICENSE_KEY=$newLic`n"
-    }
-    # 和安装时一样必须用 WriteAllText：PowerShell 5.1 的 `Out-File -Encoding UTF8`
-    # 会写 BOM，那三个字节会粘在 .env 第一行开头，docker compose 读出来的
-    # 首个变量名就带上了不可见前缀 —— 表现是「续期后 License 反而失效」，
-    # 而且肉眼完全看不出来。Add-Content 的默认编码同理不能用。
-    [System.IO.File]::WriteAllText("$INSTALL_DIR\.env", $envText,
-                                   [System.Text.UTF8Encoding]::new($false))
-    Info ".env 已更新"
-
-    Write-Host "重启容器..."
-    docker compose restart
-    Start-Sleep -Seconds 3
-
-    Write-Host ""
-    $verified = docker compose logs --tail 30 2>&1 | Select-String -Pattern "License 已验证" -Context 0,5
-    if ($verified) {
-        $verified
-        Info "续期成功"
-    } else {
-        Warn "未找到验证标志，看完整日志："
-        docker compose logs --tail 20
-        Warn "可恢复旧 license: copy $bak .env; docker compose restart"
-    }
-}
-
-# ─── [4] 状态 & 日志 ───────────────────────────
+# ─── [3] 状态 & 日志 ───────────────────────────
 function Do-Status {
-    Title "[4] 状态 & 日志"
+    Title "[3] 状态 & 日志"
     Set-Location $INSTALL_DIR
     Write-Host "`n── 容器状态 ──"
     docker compose ps
@@ -365,9 +303,9 @@ function Do-Status {
     docker compose logs --tail 30
 }
 
-# ─── [5] 卸载 ──────────────────────────────────
+# ─── [4] 卸载 ──────────────────────────────────
 function Do-Uninstall {
-    Title "[5] 卸载"
+    Title "[4] 卸载"
     Set-Location $INSTALL_DIR
     Warn "此操作将停止并删除容器"
     Write-Host "  数据目录 .\data (cookies/DB/日志) 不会自动删除，可手动清理。" -ForegroundColor Yellow
@@ -387,57 +325,13 @@ function Do-Uninstall {
     }
 }
 
-# ─── [6] 查看机器码 ────────────────────────────
-function Do-MachineId {
-    Title "[6] 查看机器码"
-    Set-Location $INSTALL_DIR
-    if (-not (Test-Path "docker-compose.yml")) { Die "还没安装，请先选 [1]" }
-
-    # 机器码存在数据卷的 .install_id 里，所以取码的容器**必须挂着同一个数据卷**。
-    # 用 docker exec（容器在跑）或 docker compose run（容器没跑，compose 会按
-    # 配置挂载数据卷）。绝不能用 docker run --rm 起裸容器 —— 那会现场生成一个
-    # 随即丢弃的 id，拿到的码是错的，签发后客户照样启动不了。
-    $raw = $null
-    if (Test-Container) {
-        $raw = docker exec $CONTAINER python -c "from app.license import _machine_id; print(_machine_id())" 2>$null
-    } else {
-        Warn "容器未运行，用一次性容器读取（仍挂载同一数据卷）"
-        $raw = docker compose run --rm --entrypoint python app -c "from app.license import _machine_id; print(_machine_id())" 2>$null
-    }
-
-    # 输出里可能混着容器启动的其它信息，只挑出 16 位十六进制那一行
-    $mid = ($raw | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f]{16}$' } | Select-Object -Last 1)
-
-    if (-not $mid) {
-        Err "没取到机器码"
-        Write-Host "  原始输出：" -ForegroundColor Gray
-        $raw | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-        Write-Host "`n  也可以直接看文件：" -ForegroundColor Cyan
-        Write-Host "    type $INSTALL_DIR\data\.install_id" -ForegroundColor Cyan
-        return
-    }
-
-    Write-Host ""
-    Hr
-    Write-Host "  机器码：$mid" -ForegroundColor Yellow
-    Hr
-    Write-Host "  把这一串发给卖家，即可签发绑定本机的 License。" -ForegroundColor White
-    Write-Host "  它存在数据目录里，容器重建/镜像升级都不会变；" -ForegroundColor Gray
-    Write-Host "  但换服务器或删掉 data 目录后会变，需要重新签发。" -ForegroundColor Gray
-    Write-Host ""
-    try {
-        Set-Clipboard -Value $mid -ErrorAction Stop
-        Info "已复制到剪贴板"
-    } catch { }
-}
-
 # ─── 主菜单 ────────────────────────────────────
 Check-Deps
 New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 
 while ($true) {
     Clear-Host
-    Title "续火花 SaaS Windows 部署 ($env:COMPUTERNAME)"
+    Title "续火花 Windows 部署 ($env:COMPUTERNAME)"
     Write-Host ""
     if (Test-Container) {
         Write-Host "  状态: ● 运行中" -ForegroundColor Green -NoNewline
@@ -449,22 +343,18 @@ while ($true) {
     Write-Host ""
     Write-Host "  [1] 安装 / 启动 / 升级服务"
     Write-Host "  [2] 重置用户密码"
-    Write-Host "  [3] 续期 License"
-    Write-Host "  [4] 查看状态 & 日志"
-    Write-Host "  [5] 卸载"
-    Write-Host "  [6] 查看机器码（签发绑定 License 用）"
+    Write-Host "  [3] 查看状态 & 日志"
+    Write-Host "  [4] 卸载"
     Write-Host ""
     Write-Host "  [0] 退出"
     Write-Host ""
-    $choice = Read-Host "选择 [0-6]"
+    $choice = Read-Host "选择 [0-4]"
 
     switch ($choice) {
         "1" { Do-Install }
         "2" { Do-ResetPassword }
-        "3" { Do-Renew }
-        "4" { Do-Status }
-        "5" { Do-Uninstall }
-        "6" { Do-MachineId }
+        "3" { Do-Status }
+        "4" { Do-Uninstall }
         "0" { Write-Host "再见 👋"; exit 0 }
         default { Warn "无效选择" }
     }

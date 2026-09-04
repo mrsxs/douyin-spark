@@ -11,7 +11,7 @@
     <input name="q" value="{{ q }}" placeholder="搜索用户名 / 邮箱…" class="input !pl-9 !rounded-xl !bg-ios-fill2 !border-transparent" />
   </div>
   <div class="ios-seg">
-    {% for v, label in [('all','全部'),('active','活跃'),('expired','过期'),('inactive','禁用')] %}
+    {% for v, label in [('all','全部'),('active','启用'),('inactive','停用')] %}
     <button type="submit" name="status" value="{{ v }}" class="ios-seg-item {% if status == v %}on{% endif %}">{{ label }}</button>
     {% endfor %}
   </div>
@@ -24,7 +24,6 @@
         <th class="px-5 py-3 text-left">用户</th>
         <th class="px-5 py-3 text-left">邮箱</th>
         <th class="px-5 py-3 text-center">状态</th>
-        <th class="px-5 py-3 text-left">到期</th>
         <th class="px-5 py-3 text-center">账号数</th>
         <th class="px-5 py-3 text-left">注册时间</th>
         <th class="px-5 py-3"></th>
@@ -46,16 +45,11 @@
         </td>
         <td class="px-5 py-3 text-ios-label2 font-mono text-xs">{{ u.email or "—" }}</td>
         <td class="px-5 py-3 text-center">
-          {% if not u.is_active %}
-            <span class="apple-chip-gray">已禁用</span>
-          {% elif u.expires_at and u.expires_at > now %}
-            <span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>活跃</span>
+          {% if u.is_active %}
+            <span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>启用</span>
           {% else %}
-            <span class="apple-chip-red">过期</span>
+            <span class="apple-chip-gray">已停用</span>
           {% endif %}
-        </td>
-        <td class="px-5 py-3 text-ios-label2 font-mono text-xs">
-          {% if u.expires_at %}{{ u.expires_at.strftime("%Y-%m-%d") }}{% else %}—{% endif %}
         </td>
         <td class="px-5 py-3 text-center">
           <span class="apple-chip-gray">{{ u._acc_count|default(0) }} / {{ u.max_accounts }}</span>
@@ -66,7 +60,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="px-5 py-12 text-center text-ios-label3">无匹配用户</td></tr>
+      <tr><td colspan="6" class="px-5 py-12 text-center text-ios-label3">无匹配用户</td></tr>
       {% endfor %}
     </tbody>
   </table>

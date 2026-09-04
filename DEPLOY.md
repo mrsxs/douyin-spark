@@ -1,215 +1,311 @@
 # 部署指南
 
+面向自己在服务器上跑一套的场景。想先在本机试试看 → [README 的源码运行](README.md#方式二源码运行)。
+
+## 目录
+
+- [架构总览](#架构总览)
+- [1. 部署（三选一）](#1-部署三选一)
+- [2. 配置 HTTPS](#2-配置-https)
+- [3. 镜像源](#3-镜像源)
+- [4. 升级](#4-升级)
+- [5. 备份与恢复](#5-备份与恢复)
+- [6. 日常运维](#6-日常运维)
+- [7. 从旧的授权码版本迁移](#7-从旧的授权码版本迁移)
+- [8. 故障排查](#8-故障排查)
+
+---
+
 ## 架构总览
 
 ```
-┌──────────────────┐           ┌──────────────────┐
-│ 客户（付费）       │  HTTPS   │ 你的服务器        │
-│ Browser          │ ───────→ │ Docker 容器       │
-└──────────────────┘           │ ┌──────────────┐ │
-                               │ │ 续火花 app    │ │
-                               │ │ (Cython .so) │ │
-                               │ └──────────────┘ │
-                               │ volume: /data   │
-                               └──────────────────┘
+┌──────────┐   HTTPS   ┌──────────── 你的服务器 ────────────┐
+│ 浏览器    │ ────────→ │  Caddy / Nginx 反代               │
+└──────────┘           │        ↓                          │
+                       │  Docker 容器 douyin-spark :8765   │
+                       │    ├─ FastAPI + scheduler 线程     │
+                       │    ├─ Node 子进程（签名）           │
+                       │    └─ Chromium（仅扫码登录时起）    │
+                       │        ↓                          │
+                       │  bind mount → ./data              │
+                       │    app.db · cookies · 私钥 · 日志  │
+                       └───────────────────────────────────┘
+                                    │
+                                    ↓
+                          抖音 API · 自建 ddddocr（可选）
 ```
 
-- **镜像**：Cython 编译核心代码为 `.so`，反编译难度大
-- **分发**：推到 **GHCR 私有仓库**（只有你能 pull）
-- **License**：客户付款后你本地 `python tools/issue_license.py` 签发 License Key，客户填进 `.env`
-- **首次启动**：容器自动生成强随机 admin 密码，打印到日志一次
+单容器、单进程、SQLite。**所有状态都在 `/data`**，容器本身随时可以删了重建。
 
 ---
 
-## 1. 首次初始化（你本地做一次）
+## 1. 部署（三选一）
 
-### 1.1 生成 License 签名密钥对
-
-```bash
-# 已生成：license_private_key.pem（私钥，绝密！）
-#         license_public_key.pem（公钥，已嵌入 app/license.py）
-
-# 如果要重新生成（注意：重新生成后所有旧 License 失效）
-python3 -c "
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-open('license_private_key.pem', 'wb').write(priv.private_bytes(
-    serialization.Encoding.PEM,
-    serialization.PrivateFormat.PKCS8,
-    serialization.NoEncryption()))
-open('license_public_key.pem', 'wb').write(priv.public_key().public_bytes(
-    serialization.Encoding.PEM,
-    serialization.PublicFormat.SubjectPublicKeyInfo))
-"
-import os; os.chmod('license_private_key.pem', 0o600)
-# 然后把 license_public_key.pem 内容粘到 app/license.py 的 _PUBLIC_KEY_PEM
-```
-
-**⚠️ `license_private_key.pem` 绝不能进 git 或镜像！** 已在 `.gitignore` / `.dockerignore`。
-
-### 1.2 签发 License
+### 1.1 一键脚本（最省事）
 
 ```bash
-# 宽松模式（推荐，不绑机器）
-python tools/issue_license.py --days 365 --tier pro --note "闲鱼 HU287-客户A"
-
-# 严格模式（绑机器，需要客户先启动报错拿到机器码再签）
-# 客户先跑一次容器，会在启动失败时打印 "当前机器码：abc123"
-python tools/issue_license.py --days 365 --machine abc123 --note "客户B"
-
-# 输出的长字符串就是 License Key，发给客户
+curl -fsSL https://raw.githubusercontent.com/mrsxs/douyin-spark/main/deploy.sh -o deploy.sh
+chmod +x deploy.sh && ./deploy.sh
 ```
 
----
+脚本会：检查 Docker → 下载 compose → 问两个可跳过的问题（ddddocr key、管理员密码）→ 拉镜像 → 写 `.env`（600 权限）→ 起容器 → 等健康检查 → 打印访问地址和密码。
 
-## 2. 把代码推到 GitHub（私有仓库）
+默认装到 `/opt/douyin-spark`（非 root 时是 `~/douyin-spark`），改 `INSTALL_DIR` 环境变量可以换位置。
 
-```bash
-cd /Users/apple/code/python/抖音续火花
-
-# 初始化 git（如果还没）
-git init
-git add -A
-git status  # ⚠️ 仔细看有没有 .env / license_private_key.pem / data/ — 不应该出现！
-git commit -m "init"
-
-# GitHub 新建私有 repo（例：douyin-spark），然后：
-git remote add origin git@github.com:YOUR_GITHUB/douyin-spark.git
-git branch -M main
-git push -u origin main
-```
-
-推送后，GitHub Actions 会自动构建 Docker 镜像并推到 GHCR：
-`ghcr.io/YOUR_GITHUB/douyin-spark:latest`
-
-**让 GHCR 镜像私有**：GitHub → Packages → douyin-spark → Package settings → Change visibility → Private
-
----
-
-## 3. 服务器部署
-
-### 3.1 准备
-
-```bash
-# 服务器上
-apt install docker.io docker-compose-plugin
-
-# 登录 GHCR（首次）
-echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
-# TOKEN 在 github.com/settings/tokens（需要 read:packages 权限）
-```
-
-### 3.2 拉取并启动
+### 1.2 手动 compose
 
 ```bash
 mkdir -p /opt/douyin-spark && cd /opt/douyin-spark
+curl -fsSL https://raw.githubusercontent.com/mrsxs/douyin-spark/main/docker-compose.yml -o docker-compose.yml
 
-# 复制 docker-compose.yml 过来
-wget https://raw.githubusercontent.com/YOUR_GITHUB/douyin-spark/main/docker-compose.yml
-# 或手动拷贝
-
-# 创建 .env
-cat > .env <<EOF
-LICENSE_KEY=客户拿到的 license 字符串
-DOUYIN_CAPTCHA_KEY=你的滑块服务 key
-EOF
-
-# 拉镜像
-docker compose pull
-
-# 首次启动（会随机生成 admin 密码并打印）
+# .env 可以完全不写。要自定义就照 .env.example 填
 docker compose up -d
-docker compose logs -f | head -30
-# ==> 复制密码保存！此后 logs 里不会再有明文
-
-# 浏览器访问
-# http://服务器IP:8765/login
-# 用 admin / 刚才打印的密码登录
+docker compose logs | grep -A 8 "管理员账户"
 ```
 
-### 3.3 配置 HTTPS（推荐 Caddy 反代）
+首次启动时如果没配 `ADMIN_PASSWORD_HASH`，`docker-entrypoint.sh` 会生成一个 20 位强随机密码、bcrypt 之后注入，**并且只在日志里打印这一次**。立刻存下来。
+
+之后要改密码：
 
 ```bash
+docker compose exec app python -m app.cli reset-password --username admin
+```
+
+### 1.3 自己构建镜像
+
+```bash
+git clone https://github.com/mrsxs/douyin-spark.git
+cd douyin-spark
+docker compose build          # 先把 compose 里的 image: 换成 build: .
+docker compose up -d
+```
+
+镜像分两阶段：一层单独装 Playwright 的 Chromium（改业务代码时命中缓存，不用重下浏览器），一层是运行时。没有编译/混淆步骤。
+
+### 1.4 运维菜单（可选）
+
+`manage.sh` 是个交互式菜单，包了安装 / 改密码 / 看状态三件事：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mrsxs/douyin-spark/main/manage.sh -o manage.sh
+chmod +x manage.sh && ./manage.sh
+```
+
+Windows 用户看 [Windows安装指南.md](Windows安装指南.md)（`manage.ps1` 是同一套东西的 PowerShell 版）。
+
+---
+
+## 2. 配置 HTTPS
+
+容器只监听 8765 明文 HTTP，生产环境务必套反代。Caddy 最省事（自动签证书）：
+
+```caddyfile
 # /etc/caddy/Caddyfile
-yourdomain.com {
-    reverse_proxy localhost:8765
+spark.example.com {
+    reverse_proxy 127.0.0.1:8765
 }
 ```
 
-同时把 `docker-compose.yml` 里的 `COOKIE_SECURE: "true"` 改成 true。
+Nginx：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name spark.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/spark.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/spark.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE（运行进度、新消息推送）不能被缓冲，否则页面一直转圈
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+**上了 HTTPS 之后两件事必须做**：
+
+1. `.env` 里设 `COOKIE_SECURE=true`，重启容器。否则 session cookie 不带 `Secure` 标记。
+2. 确认反代确实在设 `X-Forwarded-For`。限流按这个头取客户端 IP —— 它是客户端可伪造的，只有在可信反代后面才有意义。**直接把 8765 暴露到公网时反而应该关掉这个分支**（见 `app/ratelimit.py:_client_key`），否则攻击者换个 header 就绕过限流了。
+
+另外把 8765 从公网防火墙上关掉，只留反代进得来：
+
+```bash
+ufw deny 8765
+```
+
+> ⚠️ **面板对公网可见时，务必确认 `ALLOW_REGISTER` 是关的**（默认就是关的）。
+> 注册成功即拿到 10 个抖音号槽位和完整 API 权限，陌生人注册完就能用你的
+> 服务器和 IP 打抖音接口 —— 封号和风控算在你头上。
 
 ---
 
-## 4. 升级 / 维护
+---
 
-### 4.1 升级到新版本
+## 3. 镜像源
+
+compose 默认用 **Docker Hub**（`mrsxs/douyin-spark:latest`），公开、pull 不需要登录。
+
+CI 同时会推 GHCR（`ghcr.io/mrsxs/douyin-spark`），但 **GitHub 的 container package 默认是私有的** ——
+匿名 `docker pull` 会 403。要用 GHCR 得二选一：
+
+- 在 GitHub → Packages → 该 package → Package settings → Change visibility 改成 Public
+- 或者部署机上先 `docker login ghcr.io -u <用户名> -p <带 read:packages 的 token>`
+
+没确认过 visibility 就别把 compose 里的 `image:` 换成 GHCR，否则新机器一部署就卡在 pull。
+
+验证某个 GHCR 包是不是公开：
 
 ```bash
+curl -s "https://ghcr.io/token?scope=repository:mrsxs/douyin-spark:pull&service=ghcr.io"
+# 公开包返回 {"token":"..."}；私有包拿不到 token，后续 pull 就是 403
+```
+
+---
+
+## 4. 升级
+
+```bash
+cd /opt/douyin-spark
 docker compose pull
 docker compose up -d
 ```
 
-### 4.2 重置 admin 密码
+或者再跑一次 `./deploy.sh`（检测到已有 `.env` 会直接走升级分支，不重新问配置）。
+
+DB 迁移在启动时自动跑（`app/db.py:init_db()`，幂等加列 + 补索引），**不需要手动执行任何迁移命令**。升级前建议先备份一次 `data/`。
+
+看迁移有没有正常跑完：
 
 ```bash
-# 方式 A：删标记文件后重启，重新生成随机密码
-docker exec douyin-spark rm /data/.admin_initialized
-docker compose restart
-
-# 方式 B：生成新哈希，手动填 docker-compose.yml 的 ADMIN_PASSWORD_HASH
-docker exec douyin-spark python -m app.cli hash-password 新密码
-```
-
-### 4.3 续费 License
-
-```bash
-# 你本地签新 License
-python tools/issue_license.py --days 365 --tier pro --note "客户A 续费 2026"
-
-# 客户更新 .env 的 LICENSE_KEY，重启容器
-docker compose restart
-```
-
-### 4.4 备份数据
-
-```bash
-# 备份 volume（含 cookies/私钥/DB）
-docker run --rm -v /opt/douyin-spark_spark-data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/backup-$(date +%F).tar.gz -C /data .
+docker compose logs --tail 50 | grep init_db
 ```
 
 ---
 
-## 5. 常见问题
+## 5. 备份与恢复
 
-### Q: 启动报 "License 已过期"
-客户的 License Key 过期了，按 4.3 续费。
+**要备份的只有一个目录**：`data/`（compose 里的 `DATA_VOLUME_PATH`，默认是 compose 文件旁边的 `./data`）。里面有：
 
-### Q: 启动报 "License 绑定的机器码与当前不匹配"
-客户换服务器了。按 1.2 重新签发不绑机器，或拿新机器码签新 License。
+| 内容 | 说明 |
+|---|---|
+| `app.db` | SQLite 主库：用户、账号、模板、定时、聊天记录、审计日志 |
+| `.secret_key` | session 签名 + 敏感字段加密密钥。**丢了等于所有加密字段解不开** |
+| `users/<uid>/accounts/<aid>/` | 每个抖音号的 cookies、私钥、init_req、联系人缓存 |
+| 日志 | 结构化运行日志 |
 
-### Q: Chromium 扫码登录无响应
-检查：
 ```bash
-docker exec douyin-spark python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); print('ok'); b.close()"
+# 备份（停机备份最干净；SQLite 开了 WAL，热备也基本安全）
+cd /opt/douyin-spark
+docker compose stop
+tar czf spark-backup-$(date +%F).tar.gz data/
+docker compose start
+
+# 恢复
+docker compose down
+rm -rf data/
+tar xzf spark-backup-2026-09-04.tar.gz
+docker compose up -d
 ```
 
-### Q: 如何更新抖音签名逻辑
-改 `douyin_im.py` → git push → Actions 自动构建新镜像 → 服务器 `docker compose pull && up -d`
+`data/` 里全是凭证，备份文件请当成密钥对待 —— 别丢进公开的对象存储。
 
 ---
 
-## 6. 防破解说明
+## 6. 日常运维
 
-- ✅ **Cython 编译**：核心代码编译成 `.so`，反编译成本极高
-- ✅ **License 过期**：离线 RSA 签名，篡改系统时间无效（签名已固定 `expires_at`）
-- ✅ **启动闸门**：验签在 `app.license.license_gate()`，`run.py` 与 `app/main.py` 的 lifespan 都要过；
-  每请求还会经过已编译的 `csrf_mw` 调 `assert_licensed()` 兜底，改明文入口也绕不过
-- ✅ **后门已关闭**：`SKIP_LICENSE_CHECK` 只在源码态有效；镜像构建时 `_ALLOW_SKIP_LICENSE` 被改成 `False` 再编译进 `license.so`
-- ⚠️ **镜像是公开的**：Docker Hub `mrsxs/douyin-spark` 免登录即可 pull（GHCR 那份才是私有）。
-  因此**不能把「拿不到镜像」当作防线**，防护完全依赖 License 校验
-- ⚠️ **不绑机器时**：客户可以把镜像转给别人用 → 建议对大客户签发时带 `--machine`（绑定后无条件生效，客户无法关闭）
-- ⚠️ **改本地系统时间**：理论上可以绕过过期，但会导致其它时间敏感功能异常（如 cookies 认证）
+```bash
+cd /opt/douyin-spark
 
-如果要加更强保护（在线心跳验证），参考方案 B：定期回调你的 license 服务器，可远程吊销。
+docker compose ps                    # 状态
+docker compose logs -f               # 实时日志
+docker compose logs --tail 200       # 最近 200 行
+docker compose restart               # 重启
+docker compose down                  # 停止并删容器（数据不动）
+
+# 健康检查
+curl -s http://127.0.0.1:8765/healthz
+
+# 用户管理（CLI）
+docker compose exec app python -m app.cli list-users
+docker compose exec app python -m app.cli reset-password --username <名字>
+docker compose exec app python -m app.cli set-admin --username <名字>        # 提权
+docker compose exec app python -m app.cli set-admin --username <名字> --off  # 撤销
+
+# 进容器
+docker compose exec app bash
+```
+
+管理员在 `/admin` 有网页后台：用户列表、账号配额、审计日志、公告、SMTP、站点域名。
+
+**开号给别人**（注册默认关闭）：
+
+```bash
+# 直接建一个普通用户
+docker compose exec app python -m app.cli reset-password --username 朋友的名字
+
+# 或临时开放注册，让对方自己注册完再关掉
+# .env 里 ALLOW_REGISTER=true → docker compose up -d → 注册 → 改回 false → up -d
+```
+
+**关于管理员账号**：`.env` 里的 `ADMIN_USERNAME` 每次启动都会被 upsert 成管理员并覆盖密码。如果这个名字撞上了某个已注册的普通用户，他会被静默提权 —— 日志里会喊出来，注意看启动日志的 `[bootstrap] ⚠️` 行。
+
+---
+
+## 7. 从旧的授权码版本迁移
+
+旧版本有两层授权，现在都没了：
+
+| 旧机制 | 现状 |
+|---|---|
+| `LICENSE_KEY`（RSA 签名的部署许可 + 机器码绑定） | 已删除。`.env` 里残留这一行会被忽略，可以删掉 |
+| 用户授权码 / `/activate` / `expires_at` 到期 | 已删除。注册完直接能用 |
+| `license_codes` 表 | 首次启动自动 `DROP TABLE` |
+| Cython 混淆 + `SKIP_LICENSE_CHECK` | 已删除，镜像里就是明文 Python |
+
+**直接 `docker compose pull && docker compose up -d` 即可**，不需要任何手动步骤。启动时的一次性迁移会：
+
+- 把旧版本里因"未激活"而 `max_accounts = 0` 的用户抬到默认配额（`app/models.py:DEFAULT_MAX_ACCOUNTS`，默认 10）
+- 删掉 `license_codes` 表
+- 在 `app_settings` 写一个标记位，保证只跑这一次 —— 之后管理员故意把某人配额调回 0，重启不会被再抬上去
+
+`users` 表里的 `expires_at` 列不会被删（SQLite 删列麻烦且没必要），代码不再读它，留着是无害的死列。
+
+日志里会看到：
+
+```
+[init_db] 授权码体系已移除：3 个用户的账号配额从 0 抬到 10
+```
+
+如果本地还留着 `license_private_key.pem`（旧版签发 License 用的私钥），现在可以删了 —— 它一直被 gitignore，不会进仓库，但留在服务器上也没意义了。
+
+---
+
+## 8. 故障排查
+
+**容器起不来**
+
+```bash
+docker compose logs --tail 100
+```
+
+常见原因：`.env` 里的 `ADMIN_PASSWORD_HASH` 没做 `$` → `$$` 转义（compose 会把 `$2b$12$...` 当变量插值，结果密码对不上）；`DATA_VOLUME_PATH` 指向的目录没权限。
+
+**定时任务时间差 8 小时** — 容器没设 `TZ`，走了 UTC。compose 默认是 `Asia/Shanghai`，自己写 compose 的记得加。
+
+**消息显示发送成功但对方没收到** — 签名失败。抖音接口在签名无效时**照样返回 OK**，这是最坑的一个坑。检查容器里 `node_modules/jsrsasign` 在不在、`node` 可执行。
+
+**扫码登录一直转圈** — Chromium 起不来。`docker compose exec app playwright install chromium` 补一次，或看日志里 Playwright 的报错。
+
+**页面进度条一直不动 / 新消息不推送** — 反代把 SSE 缓冲了。Nginx 加 `proxy_buffering off`。
+
+**登录后立刻被踢回登录页** — `SECRET_KEY` 变了（比如 `data/.secret_key` 丢了又重新生成），所有已签发的 session 失效。重新登录即可。
+
+更细的排查记录在 [`obsidian-vault/50-故障排查.md`](obsidian-vault/50-故障排查.md)。

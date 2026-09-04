@@ -162,15 +162,16 @@ def test_api_errors_are_json_not_redirect(client, url):
     assert r.json()["ok"] is False
 
 
-def test_inactive_user_gets_402_json(client, db, login):
-    """未激活用户调 API 拿到 402 JSON，而不是跳转 /activate 的 HTML。"""
+def test_disabled_user_gets_401_json(client, db, login):
+    """被停用的用户调 API 拿到 401 JSON，而不是跳转 /login 的 HTML。"""
     from app.security import hash_password
-    u = User(username="expired", password_hash=hash_password("x"),
-             expires_at=None, max_accounts=1)
+    u = User(username="banned", password_hash=hash_password("x"),
+             max_accounts=1, is_active=False)
     db.add(u); db.commit(); db.refresh(u)
 
     r = login(u).get("/api/notifications", follow_redirects=False)
-    assert r.status_code == 402
+    assert r.status_code == 401
+    assert r.headers.get("content-type", "").startswith("application/json")
     assert r.json()["ok"] is False
 
 

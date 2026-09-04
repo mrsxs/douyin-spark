@@ -1,22 +1,21 @@
 #!/bin/bash
-# 续火花 SaaS 服务器端运维主菜单
+# 续火花 服务器端运维主菜单
 #
 # 一键启动：
-#   curl -sL https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/manage.sh -o manage.sh
+#   curl -fsSL https://raw.githubusercontent.com/mrsxs/douyin-spark/main/manage.sh -o manage.sh
 #   chmod +x manage.sh
 #   ./manage.sh
 #
 # 功能：
 #   [1] 安装/启动服务（首次部署 + 后续升级）
 #   [2] 重置用户密码
-#   [3] 续期 License
-#   [4] 查看服务状态 & 日志
+#   [3] 查看服务状态 & 日志
 #   [0] 退出
 
 set -e
 
 BOLD='\033[1m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; CYAN='\033[36m'; NC='\033[0m'
-COMPOSE_URL="https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/docker-compose.yml"
+COMPOSE_URL="https://raw.githubusercontent.com/mrsxs/douyin-spark/main/docker-compose.yml"
 IMAGE="mrsxs/douyin-spark:latest"
 INSTALL_DIR="${INSTALL_DIR:-/opt/douyin-spark}"
 CONTAINER="douyin-spark"
@@ -60,7 +59,7 @@ do_install() {
     fi
 
     # .env 检查
-    if [ -f .env ] && grep -q '^LICENSE_KEY=.\+' .env; then
+    if [ -s .env ]; then
         warn "已有 .env 配置"
         read -r -p "重新配置？[y/N]: " RECONFIG
         if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
@@ -75,11 +74,11 @@ do_install() {
 
     # 向导：4 步
     echo
-    echo -e "${CYAN}━━━ 配置向导（4 步）━━━${NC}"
+    echo -e "${CYAN}━━━ 配置向导（3 步）━━━${NC}"
 
-    # [1/4] 数据存储路径
+    # [1/3] 数据存储路径
     echo
-    echo -e "${BOLD}[1/4] 数据存储路径${NC}（cookies / DB / 日志 / 加密密钥全存这里）"
+    echo -e "${BOLD}[1/3] 数据存储路径${NC}（cookies / DB / 日志 / 加密密钥全存这里）"
     echo "  默认: $INSTALL_DIR/data（相对当前目录）"
     echo "  也可填绝对路径如 /mnt/data/spark 或 /external/backup/spark"
     read -r -p "DATA_PATH (回车用默认): " DATA_PATH
@@ -96,27 +95,27 @@ do_install() {
     info "数据目录：$REAL_DATA_PATH（删除容器不丢）"
 
     echo
-    echo -e "${BOLD}[2/4] License Key${NC}"
-    while true; do
-        read -r -p "LICENSE_KEY (粘贴卖家给的长字符串): " LICENSE_KEY
-        LICENSE_KEY="$(echo "$LICENSE_KEY" | xargs)"
-        [ -z "$LICENSE_KEY" ] && { warn "不能为空"; continue; }
-        if [[ ! "$LICENSE_KEY" == *.* ]]; then
-            warn "格式异常（无 . 分隔签名）。继续？[y/N]"
-            read -r OK; [[ "$OK" =~ ^[Yy]$ ]] || continue
-        fi
-        break
-    done
-    info "License 已接收（${#LICENSE_KEY} 字符）"
-
-    echo
-    echo -e "${BOLD}[3/4] 验证码 Key${NC}（DDDocr 滑块服务，可回车跳过）"
+    echo -e "${BOLD}[2/3] 验证码服务${NC}（自建 ddddocr 滑块识别，可回车跳过）"
+    echo "      只有「短信登录」用得上；扫码登录不需要。"
     read -r -p "DOUYIN_CAPTCHA_KEY: " CAPTCHA_KEY
     CAPTCHA_KEY="$(echo "$CAPTCHA_KEY" | xargs)"
-    [ -n "$CAPTCHA_KEY" ] && info "验证码 Key 已接收" || warn "跳过（短信登录滑块无法自动识别）"
+    CAPTCHA_URL=""
+    if [ -n "$CAPTCHA_KEY" ]; then
+        # 光有 key 没有地址是配了个寂寞：compose 里 DOUYIN_CAPTCHA_URL 默认空，
+        # 运行时滑块验证会直接失败，而用户以为自己配好了。
+        read -r -p "DOUYIN_CAPTCHA_URL（服务地址，如 https://ocr.example.com）: " CAPTCHA_URL
+        CAPTCHA_URL="$(echo "$CAPTCHA_URL" | xargs)"
+        if [ -n "$CAPTCHA_URL" ]; then
+            info "验证码服务已配置"
+        else
+            warn "只填了 Key 没填地址 —— 短信登录的滑块验证仍然不可用"
+        fi
+    else
+        warn "跳过（短信登录滑块无法自动识别，扫码登录不受影响）"
+    fi
 
     echo
-    echo -e "${BOLD}[4/4] 管理员密码${NC}（自定义或回车让系统随机生成）"
+    echo -e "${BOLD}[3/3] 管理员密码${NC}（自定义或回车让系统随机生成）"
     read -r -s -p "ADMIN_PASSWORD（输入隐藏）: " ADMIN_PASS
     echo
     USE_CUSTOM_PASS=0
@@ -153,8 +152,8 @@ do_install() {
     {
         echo "# 由 manage.sh 生成 - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "DATA_VOLUME_PATH=$DATA_PATH"
-        echo "LICENSE_KEY=$LICENSE_KEY"
         [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
+        [ -n "$CAPTCHA_URL" ] && echo "DOUYIN_CAPTCHA_URL=$CAPTCHA_URL"
         echo "ADMIN_USERNAME=admin"
         # ⚠️ docker compose 把 $2b$12$xxx 当变量引用 → 必须 $ → $$ 转义
         if [ -n "$ADMIN_HASH" ]; then
@@ -219,9 +218,8 @@ do_reset_password() {
     # 生成内嵌 python 脚本，cp 进容器执行（兼容老镜像，不依赖 cli）
     cat > /tmp/_reset_admin.py <<'PYEOF'
 import os, bcrypt
-from datetime import datetime
 from app.db import SessionLocal, init_db
-from app.models import User
+from app.models import DEFAULT_MAX_ACCOUNTS, User
 init_db()
 username = os.environ.get('UNAME', 'admin')
 pwd = os.environ['NEW']
@@ -232,10 +230,9 @@ with SessionLocal() as db:
     if not u:
         u = User(username=username, password_hash=h,
                  is_admin=make_admin, is_active=True,
-                 expires_at=datetime(2099, 12, 31) if make_admin else None,
-                 max_accounts=100 if make_admin else 0)
+                 max_accounts=100 if make_admin else DEFAULT_MAX_ACCOUNTS)
         db.add(u)
-        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户（需兑换授权码激活）"} {username}'
+        msg = f'✓ 已创建{"管理员" if make_admin else "普通用户"} {username}'
     else:
         u.password_hash = h
         u.is_active = True
@@ -260,56 +257,6 @@ PYEOF
     IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
     echo "  🌐 http://${IP:-服务器IP}:8765/login"
     echo "  👤 $USERNAME"
-}
-
-# ────────────────────────────────────────────
-# [3] 续期 License
-# ────────────────────────────────────────────
-do_renew() {
-    title "[3] 续期 License"
-    cd "$INSTALL_DIR"
-    [ -f .env ] || die ".env 不存在，请先选 [1] 安装"
-
-    # 显示当前 license
-    echo "当前 License："
-    docker compose logs --tail 200 2>&1 | grep -A 5 "✓ License 已验证" | tail -6 || echo "（无法读取）"
-    echo
-
-    while true; do
-        read -r -p "粘贴卖家新签的 License Key: " NEW_LICENSE
-        NEW_LICENSE="$(echo "$NEW_LICENSE" | xargs)"
-        [ -z "$NEW_LICENSE" ] && { warn "不能为空"; continue; }
-        if [[ ! "$NEW_LICENSE" == *.* ]]; then
-            warn "格式异常。继续？[y/N]"
-            read -r OK; [[ "$OK" =~ ^[Yy]$ ]] || continue
-        fi
-        break
-    done
-
-    BACKUP=".env.bak.$(date +%Y%m%d_%H%M%S)"
-    cp .env "$BACKUP"
-    info "旧 .env 备份到 $BACKUP"
-
-    if grep -q '^LICENSE_KEY=' .env; then
-        sed -i.tmp "s#^LICENSE_KEY=.*#LICENSE_KEY=$NEW_LICENSE#" .env && rm -f .env.tmp
-    else
-        echo "LICENSE_KEY=$NEW_LICENSE" >> .env
-    fi
-    info ".env 已更新"
-
-    echo "重启容器..."
-    docker compose restart
-    sleep 3
-
-    echo
-    docker compose logs --tail 30 2>&1 | grep -A 5 "✓ License 已验证" | tail -6 || {
-        warn "未找到验证成功标志，查完整日志："
-        docker compose logs --tail 20
-        echo
-        warn "可恢复旧 license: cp $BACKUP .env && docker compose restart"
-        return 1
-    }
-    info "续期成功"
 }
 
 # ────────────────────────────────────────────
@@ -347,7 +294,7 @@ check_deps
 
 while true; do
     clear
-    title "续火花 SaaS 服务器运维 ($(hostname))"
+    title "续火花 服务器运维 ($(hostname))"
     echo
     if container_running; then
         echo -e "  状态: ${GREEN}● 运行中${NC}    数据目录: $INSTALL_DIR"
@@ -357,18 +304,16 @@ while true; do
     echo
     echo "  [1] 安装 / 启动 / 升级服务"
     echo "  [2] 重置用户密码"
-    echo "  [3] 续期 License"
-    echo "  [4] 查看状态 & 日志"
+    echo "  [3] 查看状态 & 日志"
     echo
     echo "  [0] 退出"
     echo
-    read -r -p "选择 [0-4]: " CHOICE
+    read -r -p "选择 [0-3]: " CHOICE
 
     case "$CHOICE" in
         1) do_install ;;
         2) do_reset_password ;;
-        3) do_renew ;;
-        4) do_status ;;
+        3) do_status ;;
         0) echo "再见 👋"; exit 0 ;;
         *) warn "无效选择" ;;
     esac

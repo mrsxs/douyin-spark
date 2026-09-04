@@ -4,7 +4,6 @@ codex 指出：登录状态永久留在内存没有过期清理，短信登录�
 全局 Chromium 上限 —— 连续请求可能拉起大量浏览器进程把内存吃光。
 """
 import time
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -23,7 +22,7 @@ def _clear_state():
 @pytest.fixture
 def acc(db):
     u = User(username="smsuser", password_hash=hash_password("x"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="pending_login")
     db.add(a); db.commit(); db.refresh(a)

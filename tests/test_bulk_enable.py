@@ -8,7 +8,6 @@
 也一条都发不出去，这正是无火花好友首次启用时的情形。
 """
 import json
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -19,7 +18,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="bulkuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active",
                       cookies_exist=True)
@@ -30,7 +29,7 @@ def acc(db):
 @pytest.fixture
 def other_acc(db):
     u = User(username="bulkother", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="别人的号", status="active",
                       cookies_exist=True)

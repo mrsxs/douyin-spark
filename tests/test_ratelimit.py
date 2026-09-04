@@ -1,14 +1,12 @@
-"""登录 / 注册 / 授权码兑换的限流。
+"""登录 / 注册的限流。
 
-这三个端点原本毫无限流：授权码是 [A-Z0-9]{8,24}，对按码售卖的产品
-可被枚举；登录端点可被撞库和针对单账号爆破。
+这两个端点原本毫无限流：登录可被撞库和针对单账号爆破，
+注册可被脚本批量刷号。
 """
-from datetime import datetime, timedelta
-
 import pytest
 
 from app import ratelimit
-from app.models import LicenseCode, User
+from app.models import User
 from app.security import hash_password
 
 
@@ -56,27 +54,11 @@ def test_login_within_limit_still_works(client, db):
     assert r.headers["location"] == "/"
 
 
-# ── 授权码枚举 ───────────────────────────────────────────────────
+def test_register_is_limited(client, monkeypatch):
+    # 注册默认关着（见 test_register_gate.py），这里要测的是开着时的限流
+    from app.config import settings
+    monkeypatch.setattr(settings, "allow_register", True)
 
-def test_activate_blocks_enumeration(client, db, login):
-    u = User(username="enumerator", password_hash=hash_password("x"),
-             expires_at=datetime.utcnow() + timedelta(days=1))
-    db.add(u)
-    db.add(LicenseCode(code="REALCODE12345678", duration_days=30, max_accounts=1))
-    db.commit(); db.refresh(u)
-    c = login(u)
-
-    limit = int(ratelimit.ACTIVATE_LIMIT.split("/")[0])
-    blocked = False
-    for i in range(limit + 3):
-        r = _form(c, "/activate", {"code": f"GUESS{i:011d}"})
-        if "rate_limited" in (r.headers.get("location") or ""):
-            blocked = True
-            break
-    assert blocked, "授权码可以被无限枚举"
-
-
-def test_register_is_limited(client):
     limit = int(ratelimit.REGISTER_LIMIT.split("/")[0])
     blocked = False
     for i in range(limit + 3):
@@ -125,8 +107,11 @@ def test_forwarded_for_used_as_key():
 # ── 限流提示要能被用户看懂 ───────────────────────────────────────
 
 @pytest.mark.parametrize("page", ["/login", "/register"])
-def test_rate_limited_message_is_shown(client, page):
+def test_rate_limited_message_is_shown(client, page, monkeypatch):
     """被限流时不能显示成「用户名或密码错误」—— 用户密码明明是对的。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "allow_register", True)
+
     html = client.get(f"{page}?error=rate_limited").text
     assert "频繁" in html
     assert "用户名或密码错误" not in html

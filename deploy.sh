@@ -1,21 +1,22 @@
 #!/bin/bash
-# 续火花 SaaS 一键部署（交互式）
+# 续火花 一键部署（交互式）
 #
 # 使用：
-#   curl -sL https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/deploy.sh -o deploy.sh
-#   chmod +x deploy.sh
-#   ./deploy.sh
+#   curl -fsSL https://raw.githubusercontent.com/mrsxs/douyin-spark/main/deploy.sh -o deploy.sh
+#   chmod +x deploy.sh && ./deploy.sh
 #
-# 脚本会依次向导：
-#   1) 输入 License Key（卖家签发）
-#   2) 输入验证码 Key（DDDocr 滑块服务）
-#   3) 自定义管理员密码（或跳过用自动随机）
-# 然后自动拉镜像、配置 .env、启动容器。
+# 向导两步：
+#   1) 验证码 Key（DDDocr 滑块服务，可跳过）
+#   2) 管理员密码（可跳过，容器首启自动生成强随机密码）
+# 然后自动拉镜像、写 .env、启动容器。
+#
+# 重复执行 = 升级（检测到已有 .env 时直接 pull + up -d）。
 
 set -e
 
 BOLD='\033[1m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; NC='\033[0m'
-COMPOSE_URL="https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/docker-compose.yml"
+REPO_RAW="https://raw.githubusercontent.com/mrsxs/douyin-spark/main"
+COMPOSE_URL="$REPO_RAW/docker-compose.yml"
 IMAGE="mrsxs/douyin-spark:latest"
 INSTALL_DIR="${INSTALL_DIR:-/opt/douyin-spark}"
 
@@ -25,7 +26,7 @@ warn() { echo -e "${YELLOW}⚠${NC}  $*"; }
 die()  { echo -e "${RED}❌${NC} $*" >&2; exit 1; }
 
 hr
-echo -e "${BOLD}  续火花 SaaS 一键部署${NC}"
+echo -e "${BOLD}  续火花 一键部署${NC}"
 hr
 
 # ─── 1. 前置检查 ─────────────────────────────────
@@ -54,11 +55,14 @@ else
     info "docker-compose.yml 已存在（跳过下载）"
 fi
 
-# ─── 4. 检查已有部署 ─────────────────────────────
-if [ -f .env ] && grep -q "LICENSE_KEY=.\+" .env 2>/dev/null; then
+# ─── 4. 已有部署 → 直接升级 ──────────────────────
+# 判据用「.env 存在且非空」而不是某个具体变量：去掉授权码后
+# .env 里已经没有任何一个必填项了，盯着单个 key 会误判成全新安装、
+# 把用户已经配好的管理员密码覆盖掉。
+if [ -s .env ]; then
     echo
     warn "检测到已有 .env 配置"
-    read -p "重新配置？[y/N]: " RECONFIG
+    read -r -p "重新配置？[y/N]: " RECONFIG
     if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
         echo
         info "跳过配置，直接拉最新镜像..."
@@ -75,43 +79,26 @@ fi
 # ─── 5. 交互式收集配置 ───────────────────────────
 echo
 hr
-echo -e "${BOLD}  配置向导（3 步）${NC}"
+echo -e "${BOLD}  配置向导（2 步，都可跳过）${NC}"
 hr
 
-# 5.1 License Key
+# 5.1 验证码 Key
 echo
-echo -e "${BOLD}[1/3] License Key${NC}（卖家签发的长字符串，形如 eyJ...xx==.yy...）"
-echo
-while true; do
-    read -r -p "LICENSE_KEY: " LICENSE_KEY
-    LICENSE_KEY="$(echo "$LICENSE_KEY" | xargs)"  # trim
-    if [ -z "$LICENSE_KEY" ]; then
-        warn "LICENSE_KEY 不能为空"
-        continue
-    fi
-    if [[ ! "$LICENSE_KEY" == *.* ]]; then
-        warn "格式异常（应含 \".\" 分隔的签名）。确认粘贴完整？[y/N]"
-        read -r CONFIRM
-        [[ "$CONFIRM" =~ ^[Yy]$ ]] || continue
-    fi
-    break
-done
-info "License 已接收（${#LICENSE_KEY} 字符）"
-
-# 5.2 验证码 Key
-echo
-echo -e "${BOLD}[2/3] 验证码 Key${NC}（抖音滑块识别服务 DDDocr 的 API Key，直接回车跳过）"
+echo -e "${BOLD}[1/2] 验证码 Key${NC}（自建 ddddocr 滑块识别服务的 API Key，直接回车跳过）"
+echo "      只有「短信登录」用得上；用扫码登录可以不填。"
 read -r -p "DOUYIN_CAPTCHA_KEY: " CAPTCHA_KEY
 CAPTCHA_KEY="$(echo "$CAPTCHA_KEY" | xargs)"
 if [ -n "$CAPTCHA_KEY" ]; then
-    info "验证码 Key 已接收"
+    read -r -p "DOUYIN_CAPTCHA_URL（服务地址，如 https://ocr.example.com）: " CAPTCHA_URL
+    CAPTCHA_URL="$(echo "$CAPTCHA_URL" | xargs)"
+    info "验证码服务已配置"
 else
-    warn "跳过（短信登录无法用滑块验证）"
+    warn "跳过（短信登录的滑块验证不可用，扫码登录不受影响）"
 fi
 
-# 5.3 管理员密码
+# 5.2 管理员密码
 echo
-echo -e "${BOLD}[3/3] 管理员密码${NC}（自定义或直接回车由系统随机生成）"
+echo -e "${BOLD}[2/2] 管理员密码${NC}（自定义，或直接回车由容器随机生成）"
 read -r -s -p "ADMIN_PASSWORD（输入隐藏）: " ADMIN_PASS
 echo
 if [ -n "$ADMIN_PASS" ]; then
@@ -130,14 +117,14 @@ else
     USE_CUSTOM_PASS=0
 fi
 
-# ─── 6. 拉镜像（哈希算用） ───────────────────────
+# ─── 6. 拉镜像 ───────────────────────────────────
 echo
 hr
 echo -e "${BOLD}  拉取镜像 ${IMAGE}${NC}"
 hr
 docker pull "$IMAGE"
 
-# ─── 7. 如果自定义了密码，用镜像里的 bcrypt 哈希 ──
+# ─── 7. 自定义密码 → 用镜像里的 bcrypt 算哈希 ────
 ADMIN_HASH=""
 if [ "$USE_CUSTOM_PASS" = "1" ]; then
     echo
@@ -155,12 +142,14 @@ echo
 echo "写入 .env..."
 {
     echo "# 由 deploy.sh 自动生成 - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "LICENSE_KEY=$LICENSE_KEY"
-    [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
     echo "ADMIN_USERNAME=admin"
     if [ -n "$ADMIN_HASH" ]; then
+        # compose 会把 .env 里的 $ 当变量插值，bcrypt 哈希里全是 $ ——
+        # 不转义成 $$ 的话管理员密码直接对不上（踩过）。
         echo "ADMIN_PASSWORD_HASH=$(printf '%s' "$ADMIN_HASH" | sed 's/\$/$$/g')"
     fi
+    [ -n "$CAPTCHA_KEY" ] && echo "DOUYIN_CAPTCHA_KEY=$CAPTCHA_KEY"
+    [ -n "$CAPTCHA_URL" ] && echo "DOUYIN_CAPTCHA_URL=$CAPTCHA_URL"
 } > .env
 chmod 600 .env
 info ".env 已生成（600 权限）"
@@ -192,7 +181,6 @@ else
 fi
 hr
 
-# 获取访问 IP
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -z "$IP" ] && IP="服务器IP"
 echo
@@ -215,7 +203,6 @@ echo "     docker compose pull && docker compose up -d   # 升级"
 echo "     ./deploy.sh                    # 重新配置 / 升级"
 hr
 
-# 自动 tail 一小段日志（方便看首次 admin 密码）
 if [ "$USE_CUSTOM_PASS" = "0" ]; then
     echo
     echo "以下是容器启动日志中的管理员密码信息（若看不到请稍后再用 docker compose logs 查）："

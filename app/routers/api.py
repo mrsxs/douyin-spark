@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db, SessionLocal
 from ..models import DouyinAccount, Schedule, AuditLog, Announcement, JobRun, JobRunItem, Notification
-from ..deps import require_active
+from ..deps import require_user
 from ..storage import AccountCtx, set_account_ctx
 from .. import (trigger, jobs, contacts_service, messages_service, realtime,
                 ai_reply_config, llm, voice_service, video_service)
@@ -52,7 +52,7 @@ def _iso_utc(dt) -> str | None:
 def api_contacts(
     account_id: int,
     refresh: int = 0,
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """联系人列表。
@@ -101,7 +101,7 @@ async def api_messages_stream(
     account_id: int,
     request: Request,
     interval: str = "auto",
-    user = Depends(require_active),
+    user = Depends(require_user),
 ):
     """SSE 实时消息流。浏览器开着聊天页就连着，关掉就断。
 
@@ -160,7 +160,7 @@ async def api_messages_stream(
 def api_messages(
     account_id: int, peer_uid: str,
     limit: int = 50, before: int | None = None, before_id: int | None = None,
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """读某个联系人的聊天记录（纯冷备，毫秒级）。
@@ -185,7 +185,7 @@ def api_messages(
 @router.post("/messages/{account_id}/sync")
 def api_messages_sync(
     account_id: int,
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """主动同步一次消息。
@@ -216,7 +216,7 @@ def _account_session_for(user_id: int, account_id: int):
 def api_messages_transcribe(
     account_id: int,
     payload: dict = Body(default={}),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """把一条语音转成文字。payload: {id: int} —— **本地行 id，不是 server_msg_id**。
@@ -276,7 +276,7 @@ def api_video_stream(
     account_id: int,
     aweme_id: str,
     request: Request,
-    user = Depends(require_active),
+    user = Depends(require_user),
 ):
     """把分享的视频反代给聊天页的 <video>，让它在气泡里原生播放。
 
@@ -341,7 +341,7 @@ def api_video_stream(
 def api_messages_backfill(
     account_id: int,
     payload: dict = Body(default={}),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """从抖音云端把历史消息拉回来，补上冷备表的空档。
@@ -387,7 +387,7 @@ def api_messages_backfill(
 @router.post("/refresh")
 def api_refresh(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     acc = _get_acc(payload, user, db)
@@ -476,7 +476,7 @@ def api_refresh(
 @router.post("/auto")
 def api_auto(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """触发续火花。立即返回 run_id，真正的发送在后台线程里跑。
@@ -497,7 +497,7 @@ def api_auto(
 @router.get("/runs/{run_id}/progress")
 def api_run_progress(
     run_id: int,
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """任务进度轮询端点。"""
@@ -521,7 +521,7 @@ def _format_send_detail(info: dict) -> str:
 @router.post("/send")
 def api_send(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     acc = _get_acc(payload, user, db)
@@ -573,7 +573,7 @@ def api_send(
 @router.post("/send-batch")
 def api_send_batch(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """批量给一组 uid 发同一条消息。payload: {account_id, uids: [...], text}
@@ -597,7 +597,7 @@ def api_send_batch(
 def api_update_template(
     account_id: int, uid: str,
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
@@ -638,7 +638,7 @@ def api_update_template(
 def api_bulk_template_enabled(
     account_id: int,
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """批量拨「自动续火花」开关。payload: {uids: [...], enabled: bool}
@@ -719,7 +719,7 @@ def _parse_send_range(payload: dict, cur_lo: float, cur_hi: float):
 
 
 @router.get("/schedule/{account_id}")
-def api_get_schedule(account_id: int, user=Depends(require_active), db: Session = Depends(get_db)):
+def api_get_schedule(account_id: int, user=Depends(require_user), db: Session = Depends(get_db)):
     acc = db.query(DouyinAccount).filter(
         DouyinAccount.id == account_id, DouyinAccount.user_id == user.id).first()
     if not acc:
@@ -742,7 +742,7 @@ def api_get_schedule(account_id: int, user=Depends(require_active), db: Session 
 def api_set_schedule(
     account_id: int,
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
@@ -790,7 +790,7 @@ def api_set_schedule(
 
 @router.get("/announcement")
 def api_announcement(
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """返回当前启用的最新公告（按 updated_at 倒序取第一条）"""
@@ -809,7 +809,7 @@ def api_announcement(
 @router.post("/cookies-check")
 def api_cookies_check(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """手动触发一次 cookies 体检，实时返回 ok/expired/error"""
@@ -824,7 +824,7 @@ def api_cookies_check(
 
 @router.get("/notifications")
 def api_notifications(
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
     limit: int = 30,
 ):
@@ -845,7 +845,7 @@ def api_notifications(
 @router.post("/notifications/read")
 def api_notifications_read(
     payload: dict = Body(default={}),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """标记已读。payload 可带 {id: X} 标单条；否则全部标已读"""

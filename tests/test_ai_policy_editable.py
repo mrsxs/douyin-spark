@@ -183,13 +183,12 @@ def test_预览不泄露api_key(db, active_user, login):
 
 
 def test_预览不了别人的号(db, active_user, login):
-    from datetime import datetime, timedelta
 
     from app.models import DouyinAccount, User
     from app.security import hash_password
     u, _ = active_user
     other = User(username="stranger2", password_hash=hash_password("pw123456"),
-                 expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+                 max_accounts=5)
     db.add(other); db.commit(); db.refresh(other)
     acc = DouyinAccount(user_id=other.id, label="别人的", status="active")
     db.add(acc); db.commit(); db.refresh(acc)

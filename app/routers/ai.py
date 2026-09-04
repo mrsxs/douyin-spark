@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .. import ai_reply, ai_reply_config, ai_worker, knowledge_service, llm
 from ..db import get_db
-from ..deps import require_active
+from ..deps import require_user
 from ..models import AiReplyLog, AuditLog, Contact, DouyinAccount
 from ..ratelimit import limiter
 
@@ -42,7 +42,7 @@ def _acc(account_id: int, user, db: Session) -> DouyinAccount:
 
 
 @router.get("/{account_id}")
-def get_config(account_id: int, user=Depends(require_active),
+def get_config(account_id: int, user=Depends(require_user),
                db: Session = Depends(get_db)):
     """一次回全：账号级配置 + 每个联系人的开关 + 知识库条数 + 策略默认值。
 
@@ -64,7 +64,7 @@ def get_config(account_id: int, user=Depends(require_active),
 
 @router.get("/{account_id}/prompt")
 def preview_prompt(account_id: int, uid: str = "",
-                   user=Depends(require_active), db: Session = Depends(get_db)):
+                   user=Depends(require_user), db: Session = Depends(get_db)):
     """把此刻真正会发给模型的 system prompt 原样吐出来。
 
     改策略最怕的是「界面上写了 A，实际发的是 B」—— 有这个预览，
@@ -90,7 +90,7 @@ def preview_prompt(account_id: int, uid: str = "",
 
 @router.put("/{account_id}")
 def save_config(account_id: int, payload: dict = Body(...),
-                user=Depends(require_active), db: Session = Depends(get_db)):
+                user=Depends(require_user), db: Session = Depends(get_db)):
     """保存账号级配置。开关状态变化时同步常驻轮询。"""
     acc = _acc(account_id, user, db)
     try:
@@ -117,7 +117,7 @@ def save_config(account_id: int, payload: dict = Body(...),
 
 @router.put("/{account_id}/peer/{uid}")
 def save_peer(account_id: int, uid: str, payload: dict = Body(...),
-              user=Depends(require_active), db: Session = Depends(get_db)):
+              user=Depends(require_user), db: Session = Depends(get_db)):
     """联系人级开关与话术覆盖 —— 「对谁回复」就是在这里定的。"""
     acc = _acc(account_id, user, db)
     try:
@@ -140,7 +140,7 @@ def save_peer(account_id: int, uid: str, payload: dict = Body(...),
 
 @router.get("/{account_id}/knowledge")
 def list_knowledge(account_id: int, uid: str = knowledge_service.GLOBAL_UID,
-                   user=Depends(require_active), db: Session = Depends(get_db)):
+                   user=Depends(require_user), db: Session = Depends(get_db)):
     """uid='*' 取通用库，uid=联系人 uid 取该联系人专属库。两者互不影响。"""
     acc = _acc(account_id, user, db)
     return {"ok": True, "uid": uid,
@@ -149,7 +149,7 @@ def list_knowledge(account_id: int, uid: str = knowledge_service.GLOBAL_UID,
 
 @router.post("/{account_id}/knowledge")
 def save_knowledge(account_id: int, payload: dict = Body(...),
-                   user=Depends(require_active), db: Session = Depends(get_db)):
+                   user=Depends(require_user), db: Session = Depends(get_db)):
     acc = _acc(account_id, user, db)
     uid = str(payload.get("uid") or knowledge_service.GLOBAL_UID)
     try:
@@ -168,7 +168,7 @@ def save_knowledge(account_id: int, payload: dict = Body(...),
 
 @router.delete("/{account_id}/knowledge/{entry_id}")
 def delete_knowledge(account_id: int, entry_id: int,
-                     user=Depends(require_active), db: Session = Depends(get_db)):
+                     user=Depends(require_user), db: Session = Depends(get_db)):
     acc = _acc(account_id, user, db)
     ok = knowledge_service.delete_entry(db, acc.id, entry_id)
     db.commit()
@@ -181,7 +181,7 @@ def delete_knowledge(account_id: int, entry_id: int,
 @limiter.limit(TEST_LIMIT)
 def test_reply(account_id: int, request: Request, response: Response,
                payload: dict = Body(...),
-               user=Depends(require_active), db: Session = Depends(get_db)):
+               user=Depends(require_user), db: Session = Depends(get_db)):
     """拿一段假消息跑完整链路，但**绝不发送**。
 
     这是上线前的唯一验证手段：能看到模型原样吐了什么、清洗后变成什么、
@@ -258,7 +258,7 @@ REASON_LABELS = {
 
 @router.get("/{account_id}/logs")
 def list_logs(account_id: int, limit: int = 30,
-              user=Depends(require_active), db: Session = Depends(get_db)):
+              user=Depends(require_user), db: Session = Depends(get_db)):
     """最近的自动回复记录 —— 出问题时第一时间看这里。"""
     acc = _acc(account_id, user, db)
     limit = max(1, min(int(limit), LOGS_MAX))

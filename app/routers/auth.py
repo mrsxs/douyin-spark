@@ -1,24 +1,32 @@
 """
-注册 / 登录 / 登出 / 授权码兑换
+注册 / 登录 / 登出
 """
 import re
 from datetime import datetime
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import User, AuditLog
+from ..models import DEFAULT_MAX_ACCOUNTS, AuditLog, User
 from ..security import hash_password, verify_password, issue_session
-from ..deps import SESSION_COOKIE, page_current_user, page_require_user
+from ..deps import SESSION_COOKIE, page_current_user
 from ..config import settings
-from ..codes_service import redeem_code
-from ..ratelimit import limiter, LOGIN_LIMIT, REGISTER_LIMIT, ACTIVATE_LIMIT
+from ..ratelimit import limiter, LOGIN_LIMIT, REGISTER_LIMIT
 
 router = APIRouter()
 
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
+
+
+def _guard_register() -> None:
+    """未开放注册时把 /register 当作不存在。
+
+    用 404 而不是 403：403 等于告诉扫描器「这里有个注册端点，只是关着」。
+    """
+    if not settings.allow_register:
+        raise HTTPException(status_code=404, detail="页面不存在")
 
 
 # ── 页面 ──────────────────────────────────────────────────────────────
@@ -66,6 +74,7 @@ def logout():
 
 @router.get("/register", response_class=HTMLResponse)
 def register_page(request: Request, user=Depends(page_current_user)):
+    _guard_register()
     if user:
         return RedirectResponse("/", status_code=302)
     return request.app.state.tmpl.TemplateResponse(
@@ -82,6 +91,7 @@ def register_submit(
     email: str = Form(""),
     db: Session = Depends(get_db),
 ):
+    _guard_register()
     # 输入校验
     if not USERNAME_RE.match(username):
         return RedirectResponse("/register?error=username_format", status_code=302)
@@ -97,14 +107,14 @@ def register_submit(
     user = User(
         username=username, email=email or None,
         password_hash=hash_password(password),
-        expires_at=None, max_accounts=0,
+        max_accounts=DEFAULT_MAX_ACCOUNTS,
     )
     db.add(user); db.commit(); db.refresh(user)
     db.add(AuditLog(actor_user_id=user.id, actor_kind="user", action="register",
                     ip=request.client.host if request.client else None))
     db.commit()
 
-    resp = RedirectResponse("/activate", status_code=302)
+    resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie(
         SESSION_COOKIE, issue_session(user.id, user.session_version or 0),
         max_age=settings.session_max_age,
@@ -112,35 +122,3 @@ def register_submit(
         secure=settings.cookie_secure, path="/",
     )
     return resp
-
-
-# ── 授权码兑换 ────────────────────────────────────────────────────────
-
-@router.get("/activate", response_class=HTMLResponse)
-def activate_page(request: Request, user=Depends(page_require_user)):
-    now = datetime.utcnow()
-    return request.app.state.tmpl.TemplateResponse("auth/activate.html", {
-        "request": request,
-        "user": user,
-        "now": now,
-        "is_active": bool(user.expires_at and user.expires_at > now),
-        "error": request.query_params.get("error"),
-        "ok": request.query_params.get("ok"),
-    })
-
-
-@router.post("/activate")
-@limiter.limit(ACTIVATE_LIMIT)
-def activate_submit(
-    request: Request,
-    code: str = Form(...),
-    user = Depends(page_require_user),
-    db: Session = Depends(get_db),
-):
-    result = redeem_code(
-        db, user.id, code,
-        ip=request.client.host if request.client else None,
-    )
-    if result != "ok":
-        return RedirectResponse(f"/activate?error={result}", status_code=302)
-    return RedirectResponse("/activate?ok=1", status_code=302)

@@ -1,28 +1,20 @@
 """
-管理员后台：用户、授权码、审计日志
+管理员后台：用户、公告、站点设置、审计日志
 """
 import json
-import secrets
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Body
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
-import io
-import csv
 
 from ..db import get_db
-from ..models import User, LicenseCode, DouyinAccount, AuditLog, Announcement, AppSetting, JobRun
+from ..models import User, DouyinAccount, AuditLog, Announcement, AppSetting, JobRun
 from ..deps import page_require_admin, require_admin
 from ..security import hash_password
 from ..notify import notify
 
 router = APIRouter(prefix="/admin")
-
-
-def _gen_code(length: int = 16) -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 去掉 I/O/0/1 避免混淆
-    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def _broadcast_announcement(db: Session, ann: Announcement) -> int:
@@ -42,10 +34,8 @@ def _build_stats(db: Session) -> dict:
     now = datetime.utcnow()
     return {
         "users_total":    db.query(func.count(User.id)).scalar() or 0,
-        "users_active":   db.query(func.count(User.id)).filter(User.expires_at > now).scalar() or 0,
-        "codes_total":    db.query(func.count(LicenseCode.id)).scalar() or 0,
-        "codes_unused":   db.query(func.count(LicenseCode.id)).filter(
-            LicenseCode.used_by.is_(None), LicenseCode.revoked_at.is_(None)).scalar() or 0,
+        "users_active":   db.query(func.count(User.id)).filter(
+            User.is_active == True).scalar() or 0,
         "accounts_total": db.query(func.count(DouyinAccount.id)).scalar() or 0,
         "runs_today":     db.query(func.count(AuditLog.id)).filter(
             AuditLog.action == "auto_run",
@@ -109,9 +99,7 @@ def admin_users(
         query = query.filter(or_(User.username.contains(q), User.email.contains(q)))
     now = datetime.utcnow()
     if status == "active":
-        query = query.filter(User.is_active == True, User.expires_at > now)
-    elif status == "expired":
-        query = query.filter(or_(User.expires_at.is_(None), User.expires_at < now))
+        query = query.filter(User.is_active == True)
     elif status == "inactive":
         query = query.filter(User.is_active == False)
     total = query.count()
@@ -140,30 +128,13 @@ def admin_user_detail(
     if not user:
         raise HTTPException(404)
     accounts = db.query(DouyinAccount).filter(DouyinAccount.user_id == user.id).all()
-    codes = db.query(LicenseCode).filter(LicenseCode.used_by == user.id).all()
     logs = (db.query(AuditLog).filter(AuditLog.actor_user_id == user.id)
               .order_by(AuditLog.ts.desc()).limit(50).all())
     return request.app.state.tmpl.TemplateResponse("admin/user_detail.html", {
         "request": request, "admin": admin,
         "target_user": user, "accounts": accounts,
-        "codes": codes, "logs": logs, "now": datetime.utcnow(),
+        "logs": logs, "now": datetime.utcnow(),
     })
-
-
-@router.post("/users/{user_id}/extend")
-def admin_extend(
-    user_id: int, days: int = Form(...),
-    admin = Depends(page_require_admin), db: Session = Depends(get_db),
-):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user: raise HTTPException(404)
-    now = datetime.utcnow()
-    base = user.expires_at if (user.expires_at and user.expires_at > now) else now
-    user.expires_at = base + timedelta(days=int(days))
-    db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin", action="extend_expiry",
-                    target_type="user", target_id=str(user.id), meta=f"+{days}d"))
-    db.commit()
-    return RedirectResponse(f"/admin/users/{user_id}", status_code=302)
 
 
 @router.post("/users/{user_id}/toggle-active")
@@ -214,104 +185,6 @@ def admin_set_max_accounts(
                     meta=str(user.max_accounts)))
     db.commit()
     return RedirectResponse(f"/admin/users/{user_id}", status_code=302)
-
-
-# ── 授权码 ────────────────────────────────────────────────────────────
-
-@router.get("/codes", response_class=HTMLResponse)
-def admin_codes(
-    request: Request,
-    admin = Depends(page_require_admin), db: Session = Depends(get_db),
-    filter: str = "all", page: int = 1,
-):
-    per_page = 50
-    query = db.query(LicenseCode)
-    if filter == "unused":
-        query = query.filter(LicenseCode.used_by.is_(None), LicenseCode.revoked_at.is_(None))
-    elif filter == "used":
-        query = query.filter(LicenseCode.used_by.isnot(None))
-    elif filter == "revoked":
-        query = query.filter(LicenseCode.revoked_at.isnot(None))
-    total = query.count()
-    codes = (query.order_by(LicenseCode.created_at.desc())
-                  .offset((page - 1) * per_page).limit(per_page).all())
-    # 带出 used_by 的 username
-    user_map = {}
-    uids = [c.used_by for c in codes if c.used_by]
-    if uids:
-        for u in db.query(User).filter(User.id.in_(uids)).all():
-            user_map[u.id] = u.username
-    return request.app.state.tmpl.TemplateResponse("admin/codes.html", {
-        "request": request, "admin": admin,
-        "codes": codes, "user_map": user_map,
-        "filter": filter, "total": total,
-        "page": page, "per_page": per_page,
-    })
-
-
-@router.post("/codes/new")
-def admin_codes_new(
-    count: int = Form(1), duration_days: int = Form(30),
-    max_accounts: int = Form(1), note: str = Form(""),
-    admin = Depends(page_require_admin), db: Session = Depends(get_db),
-):
-    count = max(1, min(int(count), 200))
-    generated = []
-    for _ in range(count):
-        while True:
-            code = _gen_code()
-            if not db.query(LicenseCode).filter(LicenseCode.code == code).first():
-                break
-        lc = LicenseCode(
-            code=code, duration_days=int(duration_days),
-            max_accounts=int(max_accounts), note=note[:200] or None,
-            created_by=admin.id,
-        )
-        db.add(lc); generated.append(code)
-    db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin", action="codes_generate",
-                    meta=json.dumps({"count": count, "duration_days": duration_days,
-                                     "max_accounts": max_accounts, "note": note})))
-    db.commit()
-    return RedirectResponse("/admin/codes", status_code=302)
-
-
-@router.post("/codes/{code_id}/revoke")
-def admin_code_revoke(
-    code_id: int,
-    admin = Depends(page_require_admin), db: Session = Depends(get_db),
-):
-    lc = db.query(LicenseCode).filter(LicenseCode.id == code_id).first()
-    if not lc: raise HTTPException(404)
-    lc.revoked_at = datetime.utcnow()
-    db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin", action="code_revoke",
-                    target_type="license_code", target_id=str(lc.id)))
-    db.commit()
-    return RedirectResponse("/admin/codes", status_code=302)
-
-
-@router.get("/codes.csv")
-def admin_codes_csv(
-    admin = Depends(page_require_admin), db: Session = Depends(get_db),
-    filter: str = "unused",
-):
-    query = db.query(LicenseCode)
-    if filter == "unused":
-        query = query.filter(LicenseCode.used_by.is_(None), LicenseCode.revoked_at.is_(None))
-    codes = query.order_by(LicenseCode.created_at.desc()).all()
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["code", "duration_days", "max_accounts", "note", "created_at", "used_by", "used_at", "revoked_at"])
-    for c in codes:
-        w.writerow([c.code, c.duration_days, c.max_accounts, c.note or "",
-                    c.created_at.isoformat() if c.created_at else "",
-                    c.used_by or "", c.used_at.isoformat() if c.used_at else "",
-                    c.revoked_at.isoformat() if c.revoked_at else ""])
-    buf.seek(0)
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="license_codes_{filter}.csv"'},
-    )
 
 
 # ── 审计日志 ──────────────────────────────────────────────────────────
@@ -475,25 +348,18 @@ def admin_site(
 def admin_site_save(
     request: Request,
     site_url: str = Form(""),
-    xianyu_url: str = Form(""),
-    xianyu_note: str = Form(""),
     admin = Depends(page_require_admin), db: Session = Depends(get_db),
 ):
     from .. import site_settings
     try:
-        cfg = site_settings.save(db, {
-            "site_url": site_url,
-            "xianyu_url": xianyu_url,
-            "xianyu_note": xianyu_note,
-        }, admin.id)
+        cfg = site_settings.save(db, {"site_url": site_url}, admin.id)
     except ValueError as e:
         return RedirectResponse(f"/admin/site?error={e}", status_code=302)
 
     db.add(AuditLog(actor_user_id=admin.id, actor_kind="admin",
                     action="site_update", target_type="app_setting",
                     target_id="site",
-                    meta=json.dumps({"site_url": cfg["site_url"],
-                                     "has_xianyu": bool(cfg["xianyu_url"])})))
+                    meta=json.dumps({"site_url": cfg["site_url"]})))
     db.commit()
     # 模板里的 site_cfg() 有 30s 缓存，保存后立刻失效，别让管理员以为没生效
     invalidate = getattr(request.app.state, "invalidate_site_cfg", None)

@@ -9,15 +9,14 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.routers import admin as admin_mod
-from app.models import DouyinAccount, JobRun, LicenseCode, User
+from app.models import DouyinAccount, JobRun, User
 from app.security import hash_password
 
 
 @pytest.fixture
 def admin_user(db):
     u = User(username="boss", password_hash=hash_password("x"),
-             is_admin=True, expires_at=datetime.utcnow() + timedelta(days=999),
-             max_accounts=100)
+             is_admin=True, max_accounts=100)
     db.add(u); db.commit(); db.refresh(u)
     return u
 
@@ -82,7 +81,6 @@ def test_home_page_renders_with_real_data(db, admin_user, as_admin):
     db.add(acc); db.commit(); db.refresh(acc)
     db.add(JobRun(douyin_account_id=acc.id, kind="auto", triggered_by="scheduler",
                   status="done", started_at=datetime.utcnow(), sent=5))
-    db.add(LicenseCode(code="ABCDEFGH12345678", duration_days=30, max_accounts=2))
     db.commit()
 
     r = as_admin.get("/admin")
@@ -92,8 +90,7 @@ def test_home_page_renders_with_real_data(db, admin_user, as_admin):
 
 def test_home_requires_admin(db, login):
     """普通用户进不了后台。"""
-    u = User(username="plain", password_hash=hash_password("x"),
-             expires_at=datetime.utcnow() + timedelta(days=30))
+    u = User(username="plain", password_hash=hash_password("x"))
     db.add(u); db.commit(); db.refresh(u)
     assert login(u).get("/admin").status_code == 403
 
@@ -101,17 +98,13 @@ def test_home_requires_admin(db, login):
 # ── stats 数字本身 ───────────────────────────────────────────────
 
 def test_stats_counts_are_real(db, admin_user, as_admin):
-    db.add(User(username="u2", password_hash="x",
-                expires_at=datetime.utcnow() + timedelta(days=10)))
-    db.add(User(username="u3", password_hash="x",
-                expires_at=datetime.utcnow() - timedelta(days=1)))   # 已过期
-    db.add(LicenseCode(code="UNUSEDCODE123456", duration_days=30, max_accounts=1))
-    db.add(LicenseCode(code="USEDCODE12345678", duration_days=30, max_accounts=1,
-                       used_by=admin_user.id, used_at=datetime.utcnow()))
+    db.add(User(username="u2", password_hash="x"))
+    db.add(User(username="u3", password_hash="x", is_active=False))   # 已停用
+    acc = DouyinAccount(user_id=admin_user.id, label="a", status="active")
+    db.add(acc)
     db.commit()
 
     stats = admin_mod._build_stats(db)
     assert stats["users_total"] == 3          # boss + u2 + u3
-    assert stats["users_active"] == 2         # boss + u2
-    assert stats["codes_total"] == 2
-    assert stats["codes_unused"] == 1
+    assert stats["users_active"] == 2         # boss + u2（u3 已停用）
+    assert stats["accounts_total"] == 1

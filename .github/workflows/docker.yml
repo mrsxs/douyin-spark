@@ -36,9 +36,6 @@ jobs:
 
       - name: 测试
         run: pytest -q
-        env:
-          # 测试用临时 DB，SKIP_LICENSE_CHECK 只在源码态有效
-          SKIP_LICENSE_CHECK: '1'
 
       - name: Summary
         if: always()
@@ -106,43 +103,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 镜像自检（能起来 + License 后门确实关闭）
+      - name: 镜像自检（起得来 + 路由能 import）
         run: |
           set -e
           IMG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           echo "自检镜像: $IMG"
 
-          # ① 无 LICENSE_KEY 且带 SKIP_LICENSE_CHECK=1 必须拒绝启动。
-          #    能起来说明 Dockerfile 里的 sed 没生效，后门还在 —— 直接失败。
-          if docker run --rm -e SKIP_LICENSE_CHECK=1 "$IMG" \
-               python -c "from app.license import license_gate; license_gate()" 2>/dev/null; then
-            echo "::error::SKIP_LICENSE_CHECK 后门仍然有效，镜像可被白嫖"
-            exit 1
-          fi
-          echo "✓ License 后门已关闭"
-
-          # ② 关键模块确实编译成了 .so
-          docker run --rm "$IMG" sh -c '
-            test -f app/license.cpython-*.so || { echo "license 未编译"; exit 1; }
-            test -f douyin_im.cpython-*.so   || { echo "douyin_im 未编译"; exit 1; }
-          '
-          echo "✓ 核心模块已编译"
-
-          # ③ 编译完还得能跑。
-          #    只测「编译成功」是不够的：Cython 默认把 PEP-484 注解当运行时类型声明，
-          #    FastAPI 的 `username: str = Form(...)` 会在模块 init 时抛
-          #    `TypeError: Expected str, got Form`，router 一个都 import 不进来。
-          #    这个镜像照样能通过 ①②，然后在客户机器上崩溃循环 —— 真发生过。
-          #
-          #    脚本单独放 tools/ 而不是内联：内联的多行 python 会破坏
-          #    run: | 的 YAML 缩进（也踩过），而且独立文件能在本地直接跑。
+          # 建出 app、挂上全部路由、起一次 uvicorn 打 /healthz。
+          # 只测「镜像能 docker run」是不够的：路由 import 失败照样能进 shell，
+          # 然后在用户机器上崩溃循环。脚本单独放 tools/ 而不是内联 ——
+          # 内联的多行 python 会破坏 run: | 的 YAML 缩进（踩过）。
           docker run --rm -e SECRET_KEY=ci-selfcheck -e DATA_DIR=/tmp/selfcheck \
             -v "$PWD/tools/image_selfcheck.py:/tmp/image_selfcheck.py:ro" \
             "$IMG" python /tmp/image_selfcheck.py
-
-          # 不做「docker run -d 起真容器再 curl」那种检查：正式镜像已经关掉
-          # SKIP_LICENSE_CHECK，没有有效 LICENSE_KEY 就拒绝启动，而私钥不能进 CI。
-          # 上面的自检在进程内放行闸门后起 uvicorn，同样验到了 HTTP 层。
 
       - name: Summary
         run: |

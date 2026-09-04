@@ -1,11 +1,8 @@
-"""站点级配置：对外域名 + 闲鱼商品链接。
+"""站点级配置：对外域名。
 
 存在 AppSetting KV 表里（和 SMTP 同一套机制）。
 
-- site_url    对外访问地址，分享卡二维码指向它
-- xianyu_url  闲鱼商品链接；留空则前台完全不显示购买入口
-              （客户自用部署时不该看到卖家的推广位）
-- xianyu_note 附带说明，如「口令 HU287」
+- site_url  对外访问地址，分享卡二维码指向它
 """
 from __future__ import annotations
 
@@ -20,8 +17,6 @@ SETTING_KEY = "site"
 
 DEFAULTS = {
     "site_url": "",
-    "xianyu_url": "",
-    "xianyu_note": "",
 }
 
 
@@ -55,10 +50,6 @@ def save(db: Session, cfg: dict, admin_id: int | None = None) -> dict:
     merged = load(db)
     if "site_url" in cfg:
         merged["site_url"] = _validate_url(cfg["site_url"], "站点域名")
-    if "xianyu_url" in cfg:
-        merged["xianyu_url"] = _validate_url(cfg["xianyu_url"], "闲鱼链接")
-    if "xianyu_note" in cfg:
-        merged["xianyu_note"] = (cfg["xianyu_note"] or "").strip()[:60]
 
     row = db.get(AppSetting, SETTING_KEY)
     if not row:

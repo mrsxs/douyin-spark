@@ -1,4 +1,4 @@
-# 续火花 SaaS · Windows 部署指南
+# 续火花 · Windows 部署指南
 
 适合在自己 Windows 电脑/Win 服务器跑，**避开云服务器 IP 被抖音风控**。
 
@@ -29,11 +29,11 @@ PowerShell 里跑：
 
 ```powershell
 cd $env:USERPROFILE
-iwr "https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/manage.ps1" -OutFile manage.ps1
+iwr "https://raw.githubusercontent.com/mrsxs/douyin-spark/main/manage.ps1" -OutFile manage.ps1
 ```
 
 或者直接用浏览器打开下面的 URL 另存为 `manage.ps1`：
-https://gist.githubusercontent.com/mrsxs/eb80f17ecee1944c83deb5e0c33d2d78/raw/manage.ps1
+https://raw.githubusercontent.com/mrsxs/douyin-spark/main/manage.ps1
 
 ### Step 2：运行（首次需要绕过执行策略）
 
@@ -49,26 +49,25 @@ powershell -ExecutionPolicy Bypass -File .\manage.ps1
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  续火花 SaaS Windows 部署 (你的电脑名)
+  续火花 Windows 部署 (你的电脑名)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   状态: ● 未运行    数据目录: C:\Users\xxx\douyin-spark
 
   [1] 安装 / 启动 / 升级服务
-  [2] 重置管理员密码
-  [3] 续期 License
-  [4] 查看状态 & 日志
-  [5] 卸载
+  [2] 重置用户密码
+  [3] 查看状态 & 日志
+  [4] 卸载
 
   [0] 退出
 
-选择 [0-5]: 1
+选择 [0-4]: 1
 ```
 
-选 **[1]** → 输入：
+选 **[1]** → 输入（三项都能回车跳过）：
 
-1. **License Key** - 卖家给的长字符串
-2. **DOUYIN_CAPTCHA_KEY** - 滑块识别 key（可回车跳）
+1. **数据存储路径** - 回车用默认 `.\data`
+2. **DOUYIN_CAPTCHA_KEY** - 滑块识别 key，只有短信登录用得上
 3. **管理员密码** - 自定义或回车随机
 
 脚本自动：
@@ -94,9 +93,9 @@ docker compose start      # 启
 docker compose logs -f    # 实时日志
 ```
 
-### 改密码 / 续期 / 看日志
+### 改密码 / 看日志
 
-直接跑 `manage.ps1`，选对应菜单 [2]/[3]/[4]。
+直接跑 `manage.ps1`，选对应菜单 [2]/[3]。
 
 ### 升级到新版本
 
@@ -169,18 +168,24 @@ ports:
 ## 卸载
 
 ```powershell
-.\manage.ps1     # 选 [5]
+.\manage.ps1     # 选 [4]
 ```
 
 会问是否同时删数据（cookies/DB），按需选。
 
 ## 数据备份
 
-```powershell
-# 找 volume 名
-docker volume ls | findstr spark
+数据是 bind mount，直接就是宿主机上的一个文件夹（默认 `C:\Users\你\douyin-spark\data`），
+里面有 DB、cookies、私钥、日志 —— **备份它就是备份全部**。
 
-# 备份到桌面
-docker run --rm -v spark-data:/data -v $env:USERPROFILE\Desktop:/backup `
-    alpine tar czf /backup/spark-backup.tar.gz -C /data .
+```powershell
+cd $env:USERPROFILE\douyin-spark
+
+docker compose stop
+Compress-Archive -Path .\data -DestinationPath "$env:USERPROFILE\Desktop\spark-backup-$(Get-Date -Format yyyy-MM-dd).zip"
+docker compose start
 ```
+
+恢复：停掉容器 → 删掉 `data` 文件夹 → 把备份解压回原位 → `docker compose up -d`。
+
+> ⚠️ 备份文件里全是登录凭证，当成密码文件保管，别随手传网盘。

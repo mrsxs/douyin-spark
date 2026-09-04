@@ -174,8 +174,7 @@ def resume_watchers() -> None:
                 .join(User, DouyinAccount.user_id == User.id)
                 .where(AiReplyConfig.enabled.is_(True),
                        DouyinAccount.status == "active",
-                       User.is_active.is_(True),
-                       User.expires_at > datetime.utcnow())
+                       User.is_active.is_(True))
             ).all()
             targets = [(a.user_id, a.id, c.poll_interval) for c, a in rows]
     except Exception as e:

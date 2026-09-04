@@ -3,11 +3,11 @@ data/
 .env
 .env.local
 *.secret_key
-license_private_key.pem
+# 任何私钥都不该进构建上下文（`build: .` 会把整个目录发给 daemon）
+*.pem
 
-# 工具脚本（卖家本地用，不进镜像）
+# 辅助脚本，不进镜像
 tools/
-issue_license.py
 
 # 版本控制 & IDE
 .git/

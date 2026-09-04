@@ -21,9 +21,8 @@
       <div class="flex items-center gap-2 flex-wrap">
         <h2 class="text-xl font-bold text-ios-label dark:text-slate-100">{{ target_user.username }}</h2>
         {% if target_user.is_admin %}<span class="apple-chip-purple">管理员</span>{% endif %}
-        {% if not target_user.is_active %}<span class="apple-chip-gray">已禁用</span>
-        {% elif target_user.expires_at and target_user.expires_at > now %}<span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>活跃</span>
-        {% else %}<span class="apple-chip-red">过期</span>{% endif %}
+        {% if target_user.is_active %}<span class="apple-chip-green"><span class="w-1.5 h-1.5 rounded-full bg-current"></span>启用</span>
+        {% else %}<span class="apple-chip-gray">已停用</span>{% endif %}
       </div>
       <div class="text-xs text-ios-label3 mt-0.5">
         注册于 {{ target_user.created_at.strftime("%Y-%m-%d %H:%M") if target_user.created_at else "—" }}
@@ -38,13 +37,13 @@
     <div class="apple-card-solid p-5">
       <div class="flex items-center gap-2 mb-4">
         <iconify-icon icon="lucide:badge-check" width="18" height="18" class="text-ios-blue"></iconify-icon>
-        <h3 class="font-semibold text-ios-label dark:text-slate-100">许可状态</h3>
+        <h3 class="font-semibold text-ios-label dark:text-slate-100">账户设置</h3>
       </div>
       <div class="grid grid-cols-2 gap-4 text-sm mb-5">
         <div>
-          <div class="text-xs text-ios-label3">到期时间</div>
+          <div class="text-xs text-ios-label3">注册时间</div>
           <div class="mt-1 font-mono font-semibold text-ios-label dark:text-slate-100">
-            {% if target_user.expires_at %}{{ target_user.expires_at.strftime("%Y-%m-%d %H:%M") }}{% else %}—{% endif %}
+            {{ target_user.created_at.strftime("%Y-%m-%d %H:%M") if target_user.created_at else "—" }}
           </div>
         </div>
         <div>
@@ -56,15 +55,6 @@
       </div>
 
       <div class="pt-5 border-t border-slate-200 dark:border-slate-700 space-y-3">
-        <form method="post" action="/admin/users/{{ target_user.id }}/extend" class="flex items-center gap-2">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-          <label class="text-sm text-ios-label2 w-24 shrink-0">延长订阅</label>
-          <input type="number" name="days" placeholder="天数" class="input !w-32" min="1" required />
-          <button class="apple-btn-tint text-sm">
-            <iconify-icon icon="lucide:calendar-plus" width="15" height="15"></iconify-icon>
-            延长
-          </button>
-        </form>
         <form method="post" action="/admin/users/{{ target_user.id }}/max-accounts" class="flex items-center gap-2">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
           <label class="text-sm text-ios-label2 w-24 shrink-0">账号上限</label>
@@ -138,29 +128,6 @@
   </div>
 
   <div class="space-y-5">
-    <div class="apple-card-solid overflow-hidden">
-      <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
-        <iconify-icon icon="lucide:ticket" width="16" height="16" class="text-ios-tint"></iconify-icon>
-        <div class="font-semibold text-ios-label dark:text-slate-100">使用过的授权码</div>
-      </div>
-      {% if codes %}
-      <ul class="divide-y divide-slate-100 dark:divide-slate-700">
-        {% for c in codes %}
-        <li class="px-5 py-3 text-sm">
-          <div class="font-mono text-xs text-ios-label dark:text-slate-100">{{ c.code }}</div>
-          <div class="text-xs text-ios-label3 mt-1 flex flex-wrap gap-x-2">
-            <span class="apple-chip-tint">+{{ c.duration_days }} 天</span>
-            <span class="text-ios-label3">上限 {{ c.max_accounts }}</span>
-            <span class="text-ios-label3">· {{ c.used_at.strftime("%Y-%m-%d") if c.used_at else "—" }}</span>
-          </div>
-        </li>
-        {% endfor %}
-      </ul>
-      {% else %}
-      <div class="px-5 py-8 text-center text-ios-label3 text-sm">未使用过授权码</div>
-      {% endif %}
-    </div>
-
     <div class="apple-card-solid overflow-hidden">
       <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2">
         <iconify-icon icon="lucide:history" width="16" height="16" class="text-ios-label2"></iconify-icon>

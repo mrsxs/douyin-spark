@@ -1,5 +1,5 @@
 """
-ORM 模型：User / LicenseCode / DouyinAccount / Schedule / AuditLog
+ORM 模型：User / DouyinAccount / Schedule / AuditLog
 """
 from datetime import datetime
 from sqlalchemy import (
@@ -8,6 +8,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
+
+
+# 新注册用户的默认抖音账号配额。开源自部署没有售卖概念，
+# 默认就给够用的数量；要收紧改这里或在 /admin 里逐个调。
+DEFAULT_MAX_ACCOUNTS = 10
 
 
 class User(Base):
@@ -20,8 +25,10 @@ class User(Base):
     is_admin:      Mapped[bool]      = mapped_column(Boolean, default=False)
     is_active:     Mapped[bool]      = mapped_column(Boolean, default=True)
 
-    expires_at:    Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    max_accounts:  Mapped[int]       = mapped_column(Integer, default=0)
+    # 每个用户能绑定的抖音账号数上限。管理员可在后台调整；
+    # 这是资源配额，不是付费墙 —— 自部署默认给 DEFAULT_MAX_ACCOUNTS。
+    max_accounts:  Mapped[int]       = mapped_column(
+        Integer, default=lambda: DEFAULT_MAX_ACCOUNTS)
 
     created_at:    Mapped[datetime]  = mapped_column(DateTime, default=datetime.utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -31,24 +38,6 @@ class User(Base):
     session_version: Mapped[int] = mapped_column(Integer, default=0)
 
     accounts: Mapped[list["DouyinAccount"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-
-
-class LicenseCode(Base):
-    __tablename__ = "license_codes"
-
-    id:             Mapped[int]     = mapped_column(Integer, primary_key=True)
-    code:           Mapped[str]     = mapped_column(String(24), unique=True, index=True)
-    duration_days:  Mapped[int]     = mapped_column(Integer)
-    max_accounts:   Mapped[int]     = mapped_column(Integer)
-    note:           Mapped[str | None] = mapped_column(String(200), nullable=True)
-
-    created_by:     Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    used_by:        Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
-    used_at:        Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-    revoked_at:     Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DouyinAccount(Base):
@@ -302,7 +291,7 @@ class Notification(Base):
     id:          Mapped[int]     = mapped_column(Integer, primary_key=True)
     user_id:     Mapped[int]     = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
 
-    kind:        Mapped[str]     = mapped_column(String(32))      # "send_failed" | "cookies_expired" | "license_expiring" | "info"
+    kind:        Mapped[str]     = mapped_column(String(32))      # "send_failed" | "cookies_expired" | "info"
     title:       Mapped[str]     = mapped_column(String(200))
     content:     Mapped[str | None] = mapped_column(Text, nullable=True)
     url:         Mapped[str | None] = mapped_column(String(255), nullable=True)  # 点击跳转链接

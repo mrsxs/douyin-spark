@@ -5,7 +5,6 @@ trigger.auto_run / send_batch 发完只写 JobRunItem，不碰聊天表。
 那些消息只能等下次 init 同步从抖音捞回来 —— 而抖音每个会话只回最近 ~21 条，
 捞不回来就永久没了。真实数据里 6 条成功续火花有 4 条不在聊天表。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -17,7 +16,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="chatuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active",
                       cookies_exist=True)

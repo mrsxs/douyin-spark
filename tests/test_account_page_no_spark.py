@@ -4,7 +4,6 @@
 所以拿 HTML 文本断言 —— 段控、徽章、总开关这些一旦漏渲染，
 用户就是「点了没反应」，光看后端测试发现不了。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -16,7 +15,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="pageuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active",
                       cookies_exist=True)

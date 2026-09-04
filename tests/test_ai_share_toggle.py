@@ -3,7 +3,7 @@
 这条链路直接决定一个真人号会不会自动把话发出去，所以每条闸门都要有用例：
 默认关、联系人级可覆盖、解析失败宁可不回、视频文案当不可信输入处理。
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
@@ -18,7 +18,7 @@ PEER = "123456789"
 @pytest.fixture
 def acc(db):
     u = User(username="shareuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active", cookies_exist=True)
     db.add(a); db.commit(); db.refresh(a)

@@ -7,11 +7,6 @@ import uvicorn
 
 
 def main():
-    # License 校验统一走 app.license.license_gate()
-    # （app.main 的 lifespan 也会调一次，幂等；覆盖 CMD 绕开 run.py 同样挡得住）
-    from app.license import license_gate
-    license_gate()
-
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)

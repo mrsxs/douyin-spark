@@ -5,7 +5,6 @@
 - Schedule.send_to_no_spark —— 从来没有火花(none)的普通好友。**默认关**：
   那是主动去骚扰没在互动的人，风控面和用户预期都不一样，得显式选。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -17,7 +16,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="brokenuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active",
                       cookies_exist=True)

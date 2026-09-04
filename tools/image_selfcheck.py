@@ -1,16 +1,10 @@
 """正式镜像的自检 —— 在**镜像内部**跑，CI 挂载进去执行。
 
 为什么必须有这个：
-镜像通过「编译成功」不等于能跑。Cython 默认把 PEP-484 注解当运行时类型
-声明，FastAPI 的 `username: str = Form(...)` 会在模块 init 时抛
-`TypeError: Expected str, got Form`，所有 router 一个都 import 不进来。
-这样的镜像照样能通过「.so 是否存在」的检查，然后在客户机器上崩溃循环 ——
-真发生过一次，是客户日志报上来才知道的。
-
-为什么不直接 `docker run` 起容器打 /healthz：
-正式镜像里 SKIP_LICENSE_CHECK 已被编译关闭，没有有效 LICENSE_KEY 就
-拒绝启动，而私钥不能进 CI。所以这里在进程内把闸门标记置位后起 uvicorn，
-只验「应用能不能正常服务」，不验授权（授权由另外两条检查覆盖）。
+「docker run 能进 shell」不等于应用能跑。router import 失败、模板目录
+没拷进来、node 包没装上，都能让镜像通过一个天真的 smoke test，
+然后在用户机器上崩溃循环 —— 真发生过一次，是用户日志报上来才知道的。
+所以这里把应用真起来，打 /healthz，再走一遍表单登录路径。
 
 只用运行时依赖（uvicorn + 标准库）—— 镜像里没有 httpx/pytest。
 """
@@ -40,19 +34,12 @@ def fail(msg: str) -> None:
 
 
 def main() -> None:
-    # ① 所有 router 都能 import —— 这一条就能拦住 Form/Depends 那类编译不兼容
-    from app import license as lic
-    lic._LICENSE_OK = True          # 放行 csrf_mw 里的运行时断言
-    # lifespan 里还会再调一次 license_gate()，没有有效 LICENSE_KEY 会 sys.exit(2)。
-    # main.py 是在函数内 `from .license import license_gate`，所以打模块属性有效。
-    # 这里只是让应用能起来跑自检；「授权是否真的生效」由 CI 的 ①② 两条覆盖。
-    lic.license_gate = lambda: None
-
+    # ① 所有 router 都能 import
     try:
         from app.routers import (admin, ai, api, auth,  # noqa: F401
                                  dashboard, login_flow)
     except Exception as e:
-        fail(f"router import 失败（编译不兼容）: {type(e).__name__}: {e}")
+        fail(f"router import 失败: {type(e).__name__}: {e}")
 
     import app.main as m
     from app.db import init_db
@@ -98,10 +85,10 @@ def main() -> None:
         opener.open(req, timeout=5)
     except urllib.error.HTTPError as e:
         if e.code >= 500:
-            fail(f"POST /login 返回 {e.code} —— Form 解析可能没编译对")
+            fail(f"POST /login 返回 {e.code} —— Form 解析出问题")
     except Exception as e:
         fail(f"POST /login 失败: {type(e).__name__}: {e}")
-    print("✓ 表单登录路径正常（Form 解析没问题）")
+    print("✓ 表单登录路径正常")
 
     print("✓ 镜像自检全部通过")
 

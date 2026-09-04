@@ -5,7 +5,6 @@ Why 要有手动入口：自动转写只在 AI 准备回复时才发生。用户
 media.asr，点一次全局受益（AI 之后要回也直接命中缓存）。
 """
 import json
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -21,7 +20,7 @@ MSG_ID = 555001          # server_msg_id，只用来建夹具
 @pytest.fixture
 def acc(db):
     u = User(username="voiceapi", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active", cookies_exist=True)
     db.add(a); db.commit(); db.refresh(a)
@@ -111,7 +110,7 @@ def test_cannot_transcribe_foreign_account(client, login, db, acc, csrf, stub_as
     """别人的账号里的语音，碰都不能碰。"""
     u, _a, mid = acc
     other = User(username="intruder", password_hash=hash_password("pw123456"),
-                 expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+                 max_accounts=5)
     db.add(other); db.commit(); db.refresh(other)
     foreign = DouyinAccount(user_id=other.id, label="别人的号", status="active")
     db.add(foreign); db.commit(); db.refresh(foreign)

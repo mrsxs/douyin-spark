@@ -8,11 +8,10 @@
             bg-white/90 dark:bg-slate-800/90 backdrop-blur-xl
             border-t border-ios-sep dark:border-slate-700
             pb-[env(safe-area-inset-bottom)]">
-  <div class="grid grid-cols-3">
+  <div class="grid grid-cols-2">
     {% set tabs = [
       ('/dashboard', 'flame', '火花', path.startswith('/dashboard') or path.startswith('/accounts')),
       ('#notifications', 'bell', '通知', False),
-      ('/activate', 'user-round', '我的', path.startswith('/activate')),
     ] %}
     {% for href, icon, label, active in tabs %}
       {% if href == '#notifications' %}

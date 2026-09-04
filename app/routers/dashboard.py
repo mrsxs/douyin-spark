@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db, SessionLocal
 from ..models import DouyinAccount, Schedule, JobRun, JobRunItem
-from ..deps import page_require_active, page_require_user
+from ..deps import page_require_user
 from ..storage import AccountCtx, set_account_ctx, delete_account_dir
 from .. import templates_service, contacts_service
 import douyin_im as dy
@@ -24,10 +24,6 @@ _avatar_lock = threading.Lock()
 
 @router.get("/", response_class=HTMLResponse)
 def root(request: Request, user=Depends(page_require_user)):
-    # 未激活 → /activate；已激活 → /dashboard
-    now = datetime.utcnow()
-    if not user.expires_at or user.expires_at < now:
-        return RedirectResponse("/activate", status_code=302)
     return RedirectResponse("/dashboard", status_code=302)
 
 
@@ -150,13 +146,12 @@ def _schedule_avatar_fill(account_ids: list[int], user_id: int) -> None:
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request, user=Depends(page_require_active), db: Session = Depends(get_db)):
+def dashboard(request: Request, user=Depends(page_require_user), db: Session = Depends(get_db)):
     accounts = (db.query(DouyinAccount)
                   .filter(DouyinAccount.user_id == user.id)
                   .order_by(DouyinAccount.created_at.desc())
                   .all())
     now = datetime.utcnow()
-    remain_days = (user.expires_at - now).days if user.expires_at else 0
     # 一次聚合查询计算所有账户的健康状态（避免 N+1）
     health_map = _compute_health_map(accounts, db, now)
     # 头像补齐要走抖音 API（每个账户一次网络请求），放后台线程别阻塞首屏。
@@ -168,7 +163,6 @@ def dashboard(request: Request, user=Depends(page_require_active), db: Session =
         "request": request,
         "user": user,
         "accounts": accounts,
-        "remain_days": remain_days,
         "now": now,
         "health_map": health_map,
     })
@@ -178,7 +172,7 @@ def dashboard(request: Request, user=Depends(page_require_active), db: Session =
 def account_page(
     request: Request,
     account_id: int,
-    user=Depends(page_require_active),
+    user=Depends(page_require_user),
     db: Session = Depends(get_db),
     page: int = 1, q: str = "",
 ):
@@ -272,7 +266,7 @@ def account_chat(
     request: Request,
     account_id: int,
     uid: str = "",
-    user=Depends(page_require_active),
+    user=Depends(page_require_user),
     db: Session = Depends(get_db),
 ):
     """聊天页。首屏只读冷备（毫秒级），新消息由 SSE 推。"""
@@ -319,7 +313,7 @@ def account_chat(
 @router.get("/accounts/{account_id}/runs", response_class=HTMLResponse)
 def account_runs(
     request: Request, account_id: int,
-    user=Depends(page_require_active), db: Session = Depends(get_db),
+    user=Depends(page_require_user), db: Session = Depends(get_db),
     page: int = 1,
 ):
     acc = db.query(DouyinAccount).filter(
@@ -341,7 +335,7 @@ def account_runs(
 @router.get("/accounts/{account_id}/runs/{run_id}", response_class=HTMLResponse)
 def account_run_detail(
     request: Request, account_id: int, run_id: int,
-    user=Depends(page_require_active), db: Session = Depends(get_db),
+    user=Depends(page_require_user), db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
         DouyinAccount.id == account_id, DouyinAccount.user_id == user.id).first()
@@ -362,7 +356,7 @@ def account_run_detail(
 @router.get("/accounts/{account_id}/logs", response_class=HTMLResponse)
 def account_logs(
     request: Request, account_id: int,
-    user=Depends(page_require_active), db: Session = Depends(get_db),
+    user=Depends(page_require_user), db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
         DouyinAccount.id == account_id, DouyinAccount.user_id == user.id
@@ -388,7 +382,7 @@ def account_logs(
 def create_account(
     request: Request,
     label: str = Form(...),
-    user=Depends(page_require_active),
+    user=Depends(page_require_user),
     db: Session = Depends(get_db),
 ):
     label = label.strip()[:40] or "未命名"
@@ -406,7 +400,7 @@ def create_account(
 @router.post("/accounts/{account_id}/delete")
 def delete_account(
     request: Request, account_id: int,
-    user=Depends(page_require_active), db: Session = Depends(get_db),
+    user=Depends(page_require_user), db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
         DouyinAccount.id == account_id, DouyinAccount.user_id == user.id
@@ -421,7 +415,7 @@ def delete_account(
 @router.get("/accounts/{account_id}/login", response_class=HTMLResponse)
 def account_login_page(
     request: Request, account_id: int,
-    user=Depends(page_require_active), db: Session = Depends(get_db),
+    user=Depends(page_require_user), db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
         DouyinAccount.id == account_id, DouyinAccount.user_id == user.id

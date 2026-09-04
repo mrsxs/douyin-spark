@@ -1,14 +1,11 @@
 services:
   app:
-    # Docker Hub 公开镜像，pull 不需要登录
-    # 如果想用 GHCR 私有：先 `docker login ghcr.io`，然后改成 ghcr.io/mrsxs/douyin-spark:latest
+    # Docker Hub 公开镜像，pull 不需要登录。
+    # GHCR（ghcr.io/mrsxs/douyin-spark）默认是私有包，匿名 pull 会 403 ——
+    # 要用它得先把 package visibility 改成 public，或 `docker login ghcr.io`。
+    # 想自己构建就把 image 换成 `build: .`
     image: mrsxs/douyin-spark:latest
     container_name: douyin-spark
-    # 固定容器 MAC + hostname：保证机器码跨容器重建稳定
-    # （不固定 hostname 的话，--force-recreate 后机器码会变，
-    #   绑定机器的 License 会突然启动失败）
-    mac_address: "02:42:ac:de:ad:01"
-    hostname: douyin-spark
     # 固定 DNS 避免系统 DNS 瞬断导致 imapi.douyin.com 解析失败
     dns:
       - 223.5.5.5        # 阿里 DNS（国内首选）
@@ -21,10 +18,10 @@ services:
       # ─── 时区（⭐ 关键：不设的话容器走 UTC，定时时间会差 8 小时）──
       TZ: "${TZ:-Asia/Shanghai}"
 
-      # ─── 必填 ──────────────────────────────────
-      LICENSE_KEY: "${LICENSE_KEY:?LICENSE_KEY is required，联系卖家（闲鱼 HU287）获取}"
+      # ─── 注册开关（默认关；开放注册前先想清楚面板是不是对公网可见）──
+      ALLOW_REGISTER: "${ALLOW_REGISTER:-false}"
 
-      # ─── 可选：管理员（留空则容器首次启动自动生成并打印一次）──
+      # ─── 管理员（留空则容器首次启动自动生成强随机密码并打印一次）──
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       # ADMIN_PASSWORD_HASH: "$2b$12$..."   # 显式指定 bcrypt 哈希可覆盖首次自动生成
 
@@ -42,10 +39,6 @@ services:
       DOUYIN_CAPTCHA_URL: "${DOUYIN_CAPTCHA_URL:-}"
       DOUYIN_CAPTCHA_ENDPOINT: "${DOUYIN_CAPTCHA_ENDPOINT:-/slide_match}"
       DOUYIN_CAPTCHA_KEY: "${DOUYIN_CAPTCHA_KEY:-}"
-
-      # ─── License 机器绑定 ────────────────────
-      # 无需任何环境变量：签发时若绑定了机器码，校验自动生效。
-      # 机器码取自数据卷里的 .install_id，跨容器重建稳定。
 
       # ─── 可选：邮件 SMTP（也可以在 /admin/smtp 后台配）────
       # SMTP_HOST: ""

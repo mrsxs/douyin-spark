@@ -7,7 +7,6 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,7 +16,6 @@ _TMP = tempfile.mkdtemp(prefix="spark-test-")
 os.environ["DATA_DIR"] = _TMP
 os.environ["DB_URL"] = f"sqlite:///{_TMP}/test.db"
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
-os.environ["SKIP_LICENSE_CHECK"] = "1"
 
 import pytest  # noqa: E402
 
@@ -83,13 +81,12 @@ def db():
 
 @pytest.fixture
 def make_user(db):
-    """建一个未激活用户（expires_at=None, max_accounts=0），模拟刚注册。"""
+    """建一个普通用户，模拟刚注册完。"""
     def _make(username="tester", **kw):
         u = models.User(
             username=username,
             password_hash=hash_password("pw123456"),
-            expires_at=kw.pop("expires_at", None),
-            max_accounts=kw.pop("max_accounts", 0),
+            max_accounts=kw.pop("max_accounts", models.DEFAULT_MAX_ACCOUNTS),
             **kw,
         )
         db.add(u)
@@ -100,28 +97,12 @@ def make_user(db):
 
 
 @pytest.fixture
-def make_code(db):
-    def _make(code="TESTCODE12345678", duration_days=30, max_accounts=2, **kw):
-        lc = models.LicenseCode(
-            code=code, duration_days=duration_days,
-            max_accounts=max_accounts, **kw,
-        )
-        db.add(lc)
-        db.commit()
-        db.refresh(lc)
-        return lc
-    return _make
-
-
-@pytest.fixture
 def client():
-    """TestClient，License 闸门已放行（不进 lifespan，避免起 scheduler 线程）。"""
+    """TestClient（不进 lifespan，避免起 scheduler 线程）。"""
     from fastapi.testclient import TestClient
 
-    from app import license as lic
     import app.main as main_mod
 
-    lic._LICENSE_OK = True          # csrf_mw 的 assert_licensed 兜底
     return TestClient(main_mod.app, raise_server_exceptions=False)
 
 
@@ -139,12 +120,10 @@ def login(client):
 
 @pytest.fixture
 def active_user(db):
-    """已激活用户 + 一个 active 抖音账号。"""
-    from datetime import timedelta
-
+    """普通用户 + 一个 active 抖音账号。"""
     u = models.User(
         username="apiuser", password_hash=hash_password("pw123456"),
-        expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5,
+        max_accounts=5,
     )
     db.add(u); db.commit(); db.refresh(u)
     acc = models.DouyinAccount(user_id=u.id, label="主号",

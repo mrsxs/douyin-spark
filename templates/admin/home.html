@@ -7,9 +7,9 @@
     <iconify-icon icon="lucide:users" width="14" height="14"></iconify-icon>
     用户管理
   </a>
-  <a href="/admin/codes" class="apple-btn-tint !py-1.5 !px-3 text-xs">
-    <iconify-icon icon="lucide:ticket" width="14" height="14"></iconify-icon>
-    签发授权码
+  <a href="/admin/audit" class="apple-btn-tint !py-1.5 !px-3 text-xs">
+    <iconify-icon icon="lucide:scroll-text" width="14" height="14"></iconify-icon>
+    审计日志
   </a>
 {% endblock %}
 
@@ -18,10 +18,10 @@
 <!-- 4 Stats -->
 <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
   {% set sc = [
-    ("users",       "用户总数",     stats.users_total,  "blue",   "累计注册"),
-    ("badge-check", "活跃订阅",     stats.users_active, "green",  "未过期"),
-    ("ticket",      "未使用授权码", stats.codes_unused, "tint",   stats.codes_total ~ " 张总计"),
-    ("activity",    "今日触发数",   stats.runs_today,   "purple", "今日自动续火花"),
+    ("users",       "用户总数",   stats.users_total,    "blue",   "累计注册"),
+    ("badge-check", "启用用户",   stats.users_active,   "green",  "未被停用"),
+    ("at-sign",     "抖音账号数", stats.accounts_total, "tint",   "全站已绑定"),
+    ("activity",    "今日触发数", stats.runs_today,     "purple", "今日自动续火花"),
   ] %}
   {% for ic, label, value, tone, hint in sc %}
   <div class="apple-card-solid p-5">
@@ -37,7 +37,7 @@
   {% endfor %}
 </div>
 
-<!-- 图表行：触发趋势柱状图 + 订阅状态环形图 -->
+<!-- 图表行：触发趋势柱状图 + 用户状态环形图 -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-5">
   <!-- 触发趋势（占 2 列）— 数据来自 JobRun 按日聚合 -->
   <div class="apple-card-solid p-5 lg:col-span-2">
@@ -71,12 +71,12 @@
     {% endif %}
   </div>
 
-  <!-- 订阅状态环形图 -->
+  <!-- 用户状态环形图 -->
   <div class="apple-card-solid p-5">
-    <div class="font-semibold text-ios-label dark:text-slate-100 mb-4">订阅状态分布</div>
+    <div class="font-semibold text-ios-label dark:text-slate-100 mb-4">用户状态分布</div>
     {% set active = stats.users_active %}
     {% set total = stats.users_total or 1 %}
-    {% set expired = total - active %}
+    {% set disabled = total - active %}
     {% set active_pct = (active / total * 100)|round(0) %}
     {% set r = 56 %}
     {% set c = 2 * 3.14159 * r %}
@@ -92,19 +92,19 @@
         </svg>
         <div class="absolute inset-0 flex flex-col items-center justify-center">
           <div class="text-2xl font-bold text-ios-label dark:text-slate-100">{{ active_pct|int }}%</div>
-          <div class="text-[11px] text-ios-label3">活跃率</div>
+          <div class="text-[11px] text-ios-label3">启用率</div>
         </div>
       </div>
       <div class="flex-1 space-y-2 text-sm">
         <div class="flex items-center gap-2">
           <span class="w-2.5 h-2.5 rounded-full bg-ios-green"></span>
-          <span class="flex-1 text-ios-label2">活跃订阅</span>
+          <span class="flex-1 text-ios-label2">启用</span>
           <span class="font-mono font-semibold text-ios-label dark:text-slate-100">{{ active }}</span>
         </div>
         <div class="flex items-center gap-2">
           <span class="w-2.5 h-2.5 rounded-full bg-ios-fill3 dark:bg-slate-600"></span>
-          <span class="flex-1 text-ios-label2">已过期</span>
-          <span class="font-mono font-semibold text-ios-label dark:text-slate-100">{{ expired }}</span>
+          <span class="flex-1 text-ios-label2">已停用</span>
+          <span class="font-mono font-semibold text-ios-label dark:text-slate-100">{{ disabled }}</span>
         </div>
       </div>
     </div>

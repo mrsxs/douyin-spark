@@ -5,7 +5,6 @@ cmd=301 能按 cursor 翻完整个会话，已经丢的也追得回来。
 
 回填是用户手动触发的低频操作，不进 scheduler —— 那会持续加风控面。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -17,7 +16,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="bfuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active",
                       cookies_exist=True)
@@ -202,7 +201,6 @@ def test_api_reports_missing_short_id(db, acc, login, fake):
 def test_api_other_users_account_is_404(db, acc, login, fake):
     """越权隔离：不能回填别人账号的消息。"""
     other_u = User(username="bfother", password_hash=hash_password("pw123456"),
-                   expires_at=datetime.utcnow() + timedelta(days=30),
                    max_accounts=3)
     db.add(other_u); db.commit(); db.refresh(other_u)
     victim = DouyinAccount(user_id=other_u.id, label="别人的", status="active")

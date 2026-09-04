@@ -1,8 +1,7 @@
-"""登录 / 注册 / 授权码兑换的限流。
+"""登录 / 注册的限流。
 
-背景：这三个端点原本毫无限流（slowapi 装了却从没用过）。
-授权码是 [A-Z0-9]{8,24}，对按码售卖的产品来说可被枚举；
-登录端点则可被撞库和针对单账号爆破。
+背景：这两个端点原本毫无限流（slowapi 装了却从没用过），
+可被撞库、针对单账号爆破，以及批量注册刷号。
 
 存储用 slowapi 的内存后端 —— 本项目单进程、无 Redis，够用。
 多副本部署时限流是按进程算的，需要换共享存储。
@@ -18,7 +17,6 @@ from slowapi.util import get_remote_address
 # 各端点的配额。写在一处便于调整，也方便测试引用同一常量。
 LOGIN_LIMIT = "10/minute"
 REGISTER_LIMIT = "5/minute"
-ACTIVATE_LIMIT = "10/minute"
 
 
 def _client_key(request: Request) -> str:

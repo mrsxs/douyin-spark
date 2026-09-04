@@ -109,9 +109,70 @@ def init_db():
                 if "duplicate column" not in str(e).lower():
                     print(f"[init_db] 加列 {table}.{col} 失败: {e}")
     try:
+        _migrate_drop_license()
+    except Exception as e:
+        # 不静默吞：这条迁移专门用来防「升级即变砖」。它失败时旧库里
+        # max_accounts=0 的用户能登录却一个抖音号都加不了，界面只显示
+        # 「已达上限 0」，没有任何线索指向这里。
+        # 也不 raise —— 迁移在同一个事务里写标记位，下次重启会自愈，
+        # 为它挡住整个服务启动不划算。所以喊得足够大声。
+        border = "!" * 68
+        print(f"\n{border}\n"
+              f"[init_db] ❌ 授权码遗留数据迁移失败: {type(e).__name__}: {e}\n"
+              f"  影响：从旧版升级上来、此前未激活的用户配额仍是 0，\n"
+              f"        他们能登录但加不了抖音号（界面显示「已达上限 0」）。\n"
+              f"  处理：重启容器会自动重试；若反复失败，管理员可在 /admin\n"
+              f"        逐个调整账号配额，或执行\n"
+              f"        python -m app.cli list-users 确认受影响的用户。\n"
+              f"{border}\n", flush=True)
+    try:
         _migrate_templates_json()
     except Exception as e:
         print(f"[init_db] 模板迁移失败: {e}")
+
+
+def _migrate_drop_license():
+    """一次性迁移：拆掉授权码体系后收拾旧库。
+
+    旧版本里 max_accounts=0 表示「注册了但没兑换授权码」，配额也就是 0。
+    去掉授权码后这些用户能登录却一个抖音号都加不了 —— 升级即变砖。
+    所以把 0 抬到 DEFAULT_MAX_ACCOUNTS，并丢掉 license_codes 表。
+
+    只跑一次：用 app_settings 里的标记位挡住。否则管理员后来故意把某人
+    配额调回 0，下次重启又会被抬上去。
+
+    走裸 SQL 而不是 ORM：这是启动期迁移，不能依赖 models 的当前形状。
+    但 app_settings.updated_at 的默认值是 ORM 层的 `default=datetime.utcnow`，
+    裸 INSERT 绕过它就会撞 NOT NULL —— 标记位写不进去，迁移每次启动重跑，
+    恰好破坏了它要防的那件事。所以这里必须显式带上 updated_at。
+    """
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    from .models import DEFAULT_MAX_ACCOUNTS
+
+    MARK = "migration.drop_license"
+    with engine.begin() as conn:
+        done = conn.execute(
+            text("SELECT 1 FROM app_settings WHERE key = :k"), {"k": MARK}
+        ).first()
+        if done:
+            return 0
+        n = conn.execute(
+            text("UPDATE users SET max_accounts = :d WHERE max_accounts = 0"),
+            {"d": DEFAULT_MAX_ACCOUNTS},
+        ).rowcount
+        conn.execute(text("DROP TABLE IF EXISTS license_codes"))
+        conn.execute(
+            text("INSERT INTO app_settings (key, value, updated_at) "
+                 "VALUES (:k, :v, :ts)"),
+            {"k": MARK, "v": '"done"', "ts": datetime.utcnow()},
+        )
+    if n:
+        print(f"[init_db] 授权码体系已移除：{n} 个用户的账号配额从 0 抬到 "
+              f"{DEFAULT_MAX_ACCOUNTS}")
+    return n
 
 
 def _migrate_templates_json():

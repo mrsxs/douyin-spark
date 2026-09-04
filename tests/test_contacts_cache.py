@@ -260,7 +260,6 @@ def test_last_synced_reports_time(db, acc):
 
 def test_account_page_does_not_call_douyin(db, acc, login, monkeypatch):
     """核心回归：首屏渲染不能碰网络。"""
-    from datetime import timedelta as td
     from app import trigger
 
     called = {"n": 0}
@@ -273,8 +272,6 @@ def test_account_page_does_not_call_douyin(db, acc, login, monkeypatch):
     monkeypatch.setattr(trigger, "_ensure_active", boom)
 
     u = db.get(User, acc.user_id)
-    u.expires_at = datetime.utcnow() + td(days=30)
-    db.commit()
 
     cs.upsert_cache(db, acc.id, SAMPLE); db.commit()
 

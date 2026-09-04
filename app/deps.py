@@ -1,7 +1,6 @@
 """
-FastAPI deps: current_user / require_active / require_admin / csrf 校验
+FastAPI deps: current_user / require_user / require_admin / csrf 校验
 """
-from datetime import datetime
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from .db import get_db
@@ -43,13 +42,6 @@ def require_user(user: User | None = Depends(current_user)) -> User:
     return user
 
 
-def require_active(user: User = Depends(require_user)) -> User:
-    """要求用户已激活（expires_at 在未来）"""
-    if not user.expires_at or user.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=402, detail="账户未激活或已过期")
-    return user
-
-
 def require_admin(user: User = Depends(require_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="需要管理员权限")
@@ -58,7 +50,7 @@ def require_admin(user: User = Depends(require_user)) -> User:
 
 def get_account_owned(
     account_id: int,
-    user: User = Depends(require_active),
+    user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> DouyinAccount:
     """获取属于当前用户的抖音账户（否则 404）"""
@@ -74,7 +66,6 @@ def get_account_owned(
 # ── Page-level redirect deps（HTML 路由用，未登录重定向）──
 
 class RedirectToLogin(Exception): pass
-class RedirectToActivate(Exception): pass
 
 
 def page_current_user(request: Request, db: Session = Depends(get_db)):
@@ -84,12 +75,6 @@ def page_current_user(request: Request, db: Session = Depends(get_db)):
 def page_require_user(user = Depends(page_current_user)):
     if not user:
         raise RedirectToLogin()
-    return user
-
-
-def page_require_active(user = Depends(page_require_user)):
-    if not user.expires_at or user.expires_at < datetime.utcnow():
-        raise RedirectToActivate()
     return user
 
 

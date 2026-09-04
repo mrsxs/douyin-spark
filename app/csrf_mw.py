@@ -17,7 +17,6 @@ import html
 from urllib.parse import parse_qs, urlparse
 
 from .security import issue_csrf, verify_csrf, constant_time_equals
-from .license import assert_licensed
 
 
 def _safe_referer(referer: str) -> str:
@@ -159,10 +158,6 @@ class CSRFMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-
-        # License 兜底：本模块是 cythonize 过的，而 run.py / app/main.py 是明文。
-        # 改掉明文入口跳过启动校验的话，会在这里被拦下。
-        assert_licensed()
 
         # 先做 user 注入 — 这样下游路由即使是 GET 也能拿到 request.state.user
         await self._inject_user(scope)

@@ -2,7 +2,6 @@
 FastAPI 主入口：app factory + 路由挂载 + scheduler 启动 + admin upsert
 """
 from contextlib import asynccontextmanager
-from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +13,7 @@ from .config import settings
 from .db import SessionLocal, init_db
 from .models import User
 from . import scheduler
-from .deps import RedirectToLogin, RedirectToActivate
+from .deps import RedirectToLogin
 
 
 def ensure_admin():
@@ -37,16 +36,12 @@ def ensure_admin():
             user.password_hash = settings.admin_password_hash
             user.is_admin = True
             user.is_active = True
-            if user.expires_at is None or user.expires_at < datetime(2099, 1, 1):
-                # 管理员永久有效
-                user.expires_at = datetime(2099, 12, 31)
             user.max_accounts = max(user.max_accounts or 0, 100)
         else:
             user = User(
                 username=settings.admin_username,
                 password_hash=settings.admin_password_hash,
                 is_admin=True, is_active=True,
-                expires_at=datetime(2099, 12, 31),
                 max_accounts=100,
             )
             db.add(user)
@@ -62,9 +57,6 @@ def ensure_admin():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 放在最前：直接 `uvicorn app.main:app` 绕开 run.py 时也必须过闸门
-    from .license import license_gate
-    license_gate()
     init_db()
     ensure_admin()
     scheduler.start()
@@ -75,7 +67,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.site_name, lifespan=lifespan)
 
-    # 限流（登录/注册/授权码兑换）——必须在挂路由前装好 state + handler
+    # 限流（登录 / 注册）——必须在挂路由前装好 state + handler
     from slowapi.errors import RateLimitExceeded
     from .ratelimit import limiter, rate_limit_handler
     app.state.limiter = limiter
@@ -131,16 +123,16 @@ def create_app() -> FastAPI:
         base = f"{request.url.scheme}://{request.url.hostname}"
         if request.url.port and request.url.port not in (80, 443):
             base += f":{request.url.port}"
+        allow_reg = "Allow: /register\n" if settings.allow_register else "Disallow: /register\n"
         return (
             "User-agent: *\n"
             "Allow: /\n"
             "Allow: /login\n"
-            "Allow: /register\n"
+            + allow_reg +
             "Disallow: /admin/\n"
             "Disallow: /api/\n"
             "Disallow: /dashboard\n"
             "Disallow: /accounts/\n"
-            "Disallow: /activate\n"
             f"\nSitemap: {base}/sitemap.xml\n"
         )
 
@@ -150,10 +142,9 @@ def create_app() -> FastAPI:
         base = f"{request.url.scheme}://{request.url.hostname}"
         if request.url.port and request.url.port not in (80, 443):
             base += f":{request.url.port}"
-        pages = [
-            (f"{base}/login",     "1.0", "weekly"),
-            (f"{base}/register",  "0.8", "weekly"),
-        ]
+        pages = [(f"{base}/login", "1.0", "weekly")]
+        if settings.allow_register:
+            pages.append((f"{base}/register", "0.8", "weekly"))
         urls = "\n".join(
             f"  <url><loc>{loc}</loc><priority>{pri}</priority>"
             f"<changefreq>{freq}</changefreq></url>"
@@ -172,10 +163,6 @@ def create_app() -> FastAPI:
     async def _rl(request: Request, exc: RedirectToLogin):
         return RedirectResponse("/login", status_code=302)
 
-    @app.exception_handler(RedirectToActivate)
-    async def _ra(request: Request, exc: RedirectToActivate):
-        return RedirectResponse("/activate", status_code=302)
-
     # 友好 404/403/500 页面
     @app.exception_handler(StarletteHTTPException)
     async def _he(request: Request, exc: StarletteHTTPException):
@@ -187,11 +174,6 @@ def create_app() -> FastAPI:
             if is_api:
                 return JSONResponse({"ok": False, "error": "未登录"}, status_code=401)
             return RedirectResponse("/login", status_code=302)
-        if code == 402:
-            if is_api:
-                return JSONResponse({"ok": False, "error": "账户未激活或已过期"},
-                                    status_code=402)
-            return RedirectResponse("/activate", status_code=302)
         if code in (403, 404):
             if is_api:
                 return JSONResponse({"ok": False, "error": exc.detail}, status_code=code)
@@ -238,10 +220,12 @@ def create_app() -> FastAPI:
             with SessionLocal() as db:
                 cfg = _load_site(db)
         except Exception:
-            cfg = {"site_url": "", "xianyu_url": "", "xianyu_note": ""}
+            cfg = {"site_url": ""}
         app.state._site_cfg_cache = (now + 30, cfg)
         return cfg
 
+    # 注册关掉时，模板里的注册入口也要一起消失 —— 否则用户点进去撞 404
+    tmpl.env.globals["allow_register"] = lambda: settings.allow_register
     tmpl.env.globals["site_cfg"] = _get_site_cfg
     app.state.invalidate_site_cfg = lambda: setattr(app.state, "_site_cfg_cache", None)
     tmpl.env.globals["get_current_user"] = _get_user_from_request

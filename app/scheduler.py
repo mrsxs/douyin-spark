@@ -1,6 +1,6 @@
 """
 DB 驱动的后台定时调度：每 30s 扫一遍，到点触发续火花。
-- 过期用户（expires_at < now）自动被 SQL 过滤掉
+- 被停用的用户（is_active = 0）自动被 SQL 过滤掉
 - 禁用用户（is_active=False）同上
 - 每个账户一线程，不互相阻塞
 - 重复/并发触发通过 JobRun 状态判断（不再依赖 last_ran_date，该字段仅用于 UI 展示）
@@ -77,7 +77,6 @@ def _loop():
                           .filter(Schedule.enabled == True,
                                   Schedule.time_hhmm <= hhmm,
                                   User.is_active == True,
-                                  User.expires_at > datetime.utcnow(),
                                   DouyinAccount.status == "active")
                           .all())
                 for sch, acc, user in rows:

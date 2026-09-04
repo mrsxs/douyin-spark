@@ -36,7 +36,7 @@ def cmd_reset_password(args):
     能看到全部租户的数据，而且没有任何痕迹。提权必须显式 --make-admin。
     """
     from .db import SessionLocal, init_db
-    from .models import User, AuditLog
+    from .models import DEFAULT_MAX_ACCOUNTS, AuditLog, User
     from .security import hash_password
     from .config import settings
     from datetime import datetime as _dt
@@ -67,12 +67,11 @@ def cmd_reset_password(args):
             user = User(
                 username=username, password_hash=h, is_active=True,
                 is_admin=as_admin,
-                expires_at=datetime(2099, 12, 31) if as_admin else None,
-                max_accounts=100 if as_admin else 0,
+                max_accounts=100 if as_admin else DEFAULT_MAX_ACCOUNTS,
             )
             db.add(user)
             print(f"用户 {username} 不存在，已创建为"
-                  f"{'管理员' if as_admin else '普通用户（需兑换授权码激活）'}")
+                  f"{'管理员' if as_admin else '普通用户'}")
         else:
             user.password_hash = h
             user.is_active = True
@@ -135,12 +134,11 @@ def cmd_list_users(args):
     init_db()
     with SessionLocal() as db:
         users = db.query(User).order_by(User.id).all()
-        print(f"{'ID':>4}  {'用户名':<20} {'权限':<8} {'状态':<6} 到期")
+        print(f"{'ID':>4}  {'用户名':<20} {'权限':<8} {'状态':<6} 账号配额")
         for u in users:
-            exp = u.expires_at.strftime("%Y-%m-%d") if u.expires_at else "未激活"
             print(f"{u.id:>4}  {u.username:<20} "
                   f"{'管理员' if u.is_admin else '普通':<8} "
-                  f"{'启用' if u.is_active else '停用':<6} {exp}")
+                  f"{'启用' if u.is_active else '停用':<6} {u.max_accounts}")
         admins = [u.username for u in users if u.is_admin]
         print(f"\n管理员共 {len(admins)} 个: {', '.join(admins) or '（无）'}")
         if len(admins) > 1:

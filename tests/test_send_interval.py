@@ -8,7 +8,7 @@ Why 要可调：3 秒一条对老号可能过快，20 秒一条对小号又太�
 默认值 4.5~5.5 秒是刻意的：改这个功能之前的行为就是 `5.0 ± random(-0.5, 0.5)`，
 默认值原样复刻它 —— 升级不该悄悄改变谁的发送节奏。
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
@@ -20,7 +20,7 @@ from app.security import hash_password
 @pytest.fixture
 def acc(db):
     u = User(username="intervaluser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active", cookies_exist=True)
     db.add(a); db.commit(); db.refresh(a)

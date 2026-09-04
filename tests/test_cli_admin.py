@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from app import cli
-from app.models import AuditLog, User
+from app.models import DEFAULT_MAX_ACCOUNTS, AuditLog, User
 from app.security import verify_password
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,8 +107,8 @@ def test_creates_missing_user_as_normal(db, monkeypatch):
 
     got = db.query(User).filter(User.username == "brandnewname").one()
     assert got.is_admin is False
-    assert got.expires_at is None, "普通用户新建后应未激活，需兑换授权码"
-    assert got.max_accounts == 0
+    assert got.max_accounts == DEFAULT_MAX_ACCOUNTS, \
+        "普通用户新建后应拿到默认账号配额"
 
 
 def test_creates_configured_admin_name_as_admin(db, monkeypatch):

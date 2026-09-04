@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db, SessionLocal
 from ..models import DouyinAccount, AuditLog
-from ..deps import require_active
+from ..deps import require_user
 from ..storage import AccountCtx, set_account_ctx
 import douyin_im as dy
 
@@ -104,7 +104,7 @@ def _humanize_login_error(exc: BaseException) -> str:
 @router.post("/qr/start")
 def qr_start(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     aid = int(payload.get("account_id") or 0)
@@ -140,7 +140,7 @@ def qr_start(
 @router.get("/qr/status")
 def qr_status(
     account_id: int,
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     acc = db.query(DouyinAccount).filter(
@@ -156,7 +156,7 @@ def qr_status(
 @router.post("/qr/submit-code")
 def qr_submit_code(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """扫码二次验证：前端提交短信验证码，交给后台登录线程的 code_provider。"""
@@ -312,7 +312,7 @@ def _run_sms_login(user_id: int, account_id: int, mobile: str):
 @router.post("/sms/send-code")
 def sms_send(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """启动 Playwright 短信登录：开浏览器发码。前端随后轮询 /qr/status，
@@ -348,7 +348,7 @@ def sms_send(
 @router.post("/sms/verify")
 def sms_verify(
     payload: dict = Body(...),
-    user = Depends(require_active),
+    user = Depends(require_user),
     db: Session = Depends(get_db),
 ):
     """提交短信验证码：交给后台登录线程的 code_provider 完成登录。"""

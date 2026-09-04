@@ -6,7 +6,6 @@
 
 做法：User.session_version 参与签名内容，版本对不上即失效。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -18,7 +17,7 @@ from app.security import issue_session, read_session, read_session_full
 @pytest.fixture
 def user(db):
     u = User(username="alice", password_hash="x",
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=1)
+             max_accounts=1)
     db.add(u); db.commit(); db.refresh(u)
     return u
 
@@ -83,9 +82,9 @@ def test_admin_reset_password_kicks_user_out(client, db):
     from app.security import hash_password
 
     victim = User(username="victim", password_hash=hash_password("oldpw"),
-                  expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=1)
+                  max_accounts=1)
     admin = User(username="root", password_hash=hash_password("x"), is_admin=True,
-                 expires_at=datetime.utcnow() + timedelta(days=999), max_accounts=9)
+                 max_accounts=9)
     db.add_all([victim, admin]); db.commit()
     db.refresh(victim); db.refresh(admin)
 
@@ -112,8 +111,7 @@ def test_admin_reset_password_kicks_user_out(client, db):
 
 def test_other_users_sessions_unaffected(db, user):
     """踢一个人不能把所有人都踢下线。"""
-    other = User(username="bob", password_hash="x",
-                 expires_at=datetime.utcnow() + timedelta(days=30))
+    other = User(username="bob", password_hash="x")
     db.add(other); db.commit(); db.refresh(other)
 
     other_tok = issue_session(other.id, other.session_version)

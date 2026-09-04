@@ -296,7 +296,7 @@ def test_play_cache_does_not_grow_without_bound(monkeypatch):
 @pytest.fixture
 def acc(db):
     u = User(username="vidstream", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active", cookies_exist=True)
     db.add(a); db.commit(); db.refresh(a)
@@ -340,7 +340,7 @@ def test_stream_requires_login(client, db, acc, stub_stream):
 def test_cannot_stream_from_foreign_account(client, login, db, acc, stub_stream):
     u, _a = acc
     other = User(username="vidintruder", password_hash=hash_password("pw123456"),
-                 expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+                 max_accounts=5)
     db.add(other); db.commit(); db.refresh(other)
     foreign = DouyinAccount(user_id=other.id, label="别人的号", status="active")
     db.add(foreign); db.commit(); db.refresh(foreign)

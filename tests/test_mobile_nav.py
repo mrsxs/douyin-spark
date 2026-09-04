@@ -2,7 +2,6 @@
 
 目标用户多半用手机访问（闲鱼买家），顶部 navbar 在小屏上够不着。
 """
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -15,21 +14,30 @@ NAV_MARK = "md:hidden fixed bottom-0"
 @pytest.fixture
 def user(db):
     u = User(username="mob", password_hash=hash_password("x"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=3)
+             max_accounts=3)
     db.add(u); db.commit(); db.refresh(u)
     return u
 
 
-def test_nav_absent_when_logged_out(client):
+def test_nav_absent_when_logged_out(client, monkeypatch):
     """登录/注册页不该出现底部导航。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "allow_register", True)
+
     for url in ("/login", "/register"):
-        assert NAV_MARK not in client.get(url).text
+        r = client.get(url)
+        assert r.status_code == 200, f"{url} 返回 {r.status_code}"
+        assert NAV_MARK not in r.text
 
 
 def test_nav_present_on_user_pages(user, login):
     c = login(user)
-    for url in ("/dashboard", "/activate"):
-        assert NAV_MARK in c.get(url).text, f"{url} 缺底部导航"
+    # 不用 404 页做断言 —— errors/404.html 也 include 了底部导航，
+    # 拿它当用例等于测了个恒真的东西（`/activate` 删掉后这里一度假绿）。
+    for url in ("/dashboard",):
+        r = c.get(url)
+        assert r.status_code == 200, f"{url} 返回 {r.status_code}"
+        assert NAV_MARK in r.text, f"{url} 缺底部导航"
 
 
 def test_nav_highlights_current_section(user, login, db):

@@ -5,7 +5,6 @@ Why 写回 media.asr 而不是新建一张表：前端早就会渲染 `m.media.a
 而且语音是一条消息一份，天然按 server_msg_id 去重，不像视频会被反复分享。
 """
 import json
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -20,7 +19,7 @@ AUDIO_URL = ("https://sf26-sign.douyinstatic.com/douyin-user-audio-file/"
 @pytest.fixture
 def acc(db):
     u = User(username="voiceuser", password_hash=hash_password("pw123456"),
-             expires_at=datetime.utcnow() + timedelta(days=30), max_accounts=5)
+             max_accounts=5)
     db.add(u); db.commit(); db.refresh(u)
     a = DouyinAccount(user_id=u.id, label="主号", status="active", cookies_exist=True)
     db.add(a); db.commit(); db.refresh(a)

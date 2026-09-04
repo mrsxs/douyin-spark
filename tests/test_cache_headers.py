@@ -27,8 +27,7 @@ def test_login_page_is_no_store(client):
 
 
 def test_dashboard_is_no_store(client, login, make_user):
-    from datetime import datetime, timedelta
-    u = make_user("cacheuser", expires_at=datetime.utcnow() + timedelta(days=30))
+    u = make_user("cacheuser")
     c = login(u)
     r = c.get("/dashboard")
     assert r.status_code == 200
@@ -39,8 +38,7 @@ def test_dashboard_is_no_store(client, login, make_user):
 
 def test_dashboard_varies_on_cookie(client, login, make_user):
     """就算某层缓存忽略 no-store，Vary: Cookie 也能兜住不跨用户复用。"""
-    from datetime import datetime, timedelta
-    u = make_user("cacheuser", expires_at=datetime.utcnow() + timedelta(days=30))
+    u = make_user("cacheuser")
     r = login(u).get("/dashboard")
     assert "cookie" in header(r, "vary").lower()
 
